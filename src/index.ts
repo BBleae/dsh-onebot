@@ -107,6 +107,10 @@ export interface Config {
   requireMention: boolean
   /** Unknown slash-command handling: intercept（默认）=拦截并给建议；passthrough=透传给模型。 */
   unknownCommand: 'intercept' | 'passthrough'
+  /** T2 (P1): 任务运行中的新消息处理策略：queue=排队（默认）；steer=插话进当前任务。 */
+  newMessagePolicy: 'queue' | 'steer'
+  /** T9-B (用户裁决 2026-10-12)：steer 模式下自动插话资格：admin=仅管理员（默认）；all=不限。 */
+  autoSteerPolicy: 'admin' | 'all'
   dmPolicy: 'open' | 'allowlist' | 'disabled'
   groupPolicy: 'open' | 'allowlist' | 'disabled'
   allowFrom: string[]
@@ -220,6 +224,10 @@ export const Config: Z<Config> = z.object({
     .description('群聊是否仅在 @机器人（或回复其消息）时响应'),
   unknownCommand: z.union([z.const('intercept'), z.const('passthrough')]).default('intercept')
     .description('未知斜杠命令处理：intercept（默认）=拦截并提示相近命令或 /help；passthrough=透传给模型（旧行为）'),
+  newMessagePolicy: z.union([z.const('queue'), z.const('steer')]).default('queue')
+    .description('任务运行中的新消息处理策略（P1）：queue（默认）=排队——新消息在当前任务结束后按序处理为后续回合，等待期间至多提示一次；steer=插话——运行中收到的新普通纯文字消息作为补充指令加入当前任务（模型在下一步读取）并回复提交提示；图片/文件/语音/带引用消息与 [受限用户:仅问答] 消息两种模式下都按排队处理，/steer 命令两种模式下均可用'),
+  autoSteerPolicy: z.union([z.const('admin'), z.const('all')]).default('admin')
+    .description('steer 模式下自动插话的发送者资格（T9-B 用户裁决 2026-10-12）：admin（默认）=仅管理员可自动插话；all=所有非受限发送者均可。不具备资格的消息按排队处理；/steer 命令始终仅管理员、不受本项影响；queue 模式行为不变'),
   dmPolicy: z.union([z.const('open'), z.const('allowlist'), z.const('disabled')]).default('open')
     .description('私聊策略：open=仅管理员；allowlist=仅 allowFrom；disabled=拒绝所有私聊'),
   groupPolicy: z.union([z.const('open'), z.const('allowlist'), z.const('disabled')]).default('open')
@@ -497,6 +505,8 @@ export function apply(ctx: Context, config: Config): void {
       ignoreSelf: config.ignoreSelf,
       requireMention: config.requireMention,
       unknownCommand: config.unknownCommand,
+      newMessagePolicy: config.newMessagePolicy,
+      autoSteerPolicy: config.autoSteerPolicy,
       interimMessages: config.interimMessages,
       interimRecallMs: config.interimRecallMs,
       interimRecall: config.interimRecall,

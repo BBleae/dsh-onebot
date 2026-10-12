@@ -93,10 +93,10 @@ export function makeFakeAgents(
 }
 
 /** Full bridge + WS harness: inbound via real WebSocket, outbound captured. */
-export async function makeHarness(opts?: { failCreateFor?: string; mediaDir?: string; interimMessages?: boolean; textImageThreshold?: number; maxImageBytes?: number; resumeOk?: boolean; createDelayMs?: number; transcriber?: Transcriber; trace?: TraceSink; ignoreSelf?: boolean; recorder?: InboundRecorder; inject?: InjectChannel }) {
+export async function makeHarness(opts?: { failCreateFor?: string; mediaDir?: string; interimMessages?: boolean; textImageThreshold?: number; maxImageBytes?: number; resumeOk?: boolean; createDelayMs?: number; transcriber?: Transcriber; trace?: TraceSink; ignoreSelf?: boolean; recorder?: InboundRecorder; inject?: InjectChannel; newMessagePolicy?: 'queue' | 'steer' }) {
   const ctx = new Context()
   const sessionIds: string[] = []
-  const captured = { followups: [] as Array<{ text: string; sessionId: string }>, channelTools: [] as string[], channelSections: [] as string[] }
+  const captured = { followups: [] as Array<{ text: string; sessionId: string }>, steers: [] as Array<{ text: string; sessionId: string }>, channelTools: [] as string[], channelSections: [] as string[] }
   const agents = makeFakeAgents(sessionIds, captured, opts)
   const sessions = { flush: vi.fn(async () => undefined) }
   const mediaDir = opts?.mediaDir ?? mkdtempSync(join(tmpdir(), 'onebot-test-'))
@@ -120,6 +120,8 @@ export async function makeHarness(opts?: { failCreateFor?: string; mediaDir?: st
       maxVoiceBytes: 15 * 1024 * 1024, maxFileBytes: 20 * 1024 * 1024,
       textImageThreshold: opts?.textImageThreshold ?? 0, cardFooter: 'dsh', fontFiles: [], fontFamilies: [],
       agentPreset: 'standard', workspacePath: mediaDir,
+      // T2 (P1): busy-turn policy override (absent = the 'queue' default).
+      ...(opts?.newMessagePolicy !== undefined ? { newMessagePolicy: opts.newMessagePolicy } : {}),
       // W1: optional decision-trace sink (absent = tracing off).
       trace: opts?.trace,
       // W1/T5: optional recorder / inject channel (absent = feature off).
@@ -174,6 +176,9 @@ export async function makeCmdHarness(opts?: {
   interimRecall?: boolean
   rateLimitPerMinute?: number
   restrictedMemberPrefix?: boolean
+  newMessagePolicy?: 'queue' | 'steer'
+  /** T9-B: auto-steer eligibility knob; absent = the bridge default 'admin'. */
+  autoSteerPolicy?: 'admin' | 'all'
   commands?: unknown
   allowAllUsers?: boolean
   agentDefaultModel?: unknown
@@ -186,7 +191,9 @@ export async function makeCmdHarness(opts?: {
   const ctx = new Context()
   const sessionIds: string[] = []
   const capturedMeta: Array<{ cwd?: string; agentPreset?: string }> = []
-  const captured = { followups: [] as Array<{ text: string; sessionId: string }>, createdMeta: capturedMeta }
+  // T2 (P1): steers are captured alongside followups so the /steer and
+  // 'steer'-policy tests can assert the exact steered text.
+  const captured = { followups: [] as Array<{ text: string; sessionId: string }>, steers: [] as Array<{ text: string; sessionId: string }>, createdMeta: capturedMeta }
   const agents = makeFakeAgents(sessionIds, captured)
   const sessions = { flush: vi.fn(async () => undefined) }
   const mediaDir = mkdtempSync(join(tmpdir(), 'onebot-test-'))
@@ -224,6 +231,8 @@ export async function makeCmdHarness(opts?: {
       ...(opts?.rateLimitPerMinute !== undefined ? { rateLimitPerMinute: opts.rateLimitPerMinute } : {}),
       sendErrorNotice: true,
       ...(opts?.restrictedMemberPrefix !== undefined ? { restrictedMemberPrefix: opts.restrictedMemberPrefix } : {}),
+      ...(opts?.newMessagePolicy !== undefined ? { newMessagePolicy: opts.newMessagePolicy } : {}),
+      ...(opts?.autoSteerPolicy !== undefined ? { autoSteerPolicy: opts.autoSteerPolicy } : {}),
       sensitivePatterns: [], mediaDir, maxImageBytes: 8 * 1024 * 1024,
       maxVoiceBytes: 15 * 1024 * 1024, maxFileBytes: 20 * 1024 * 1024,
       textImageThreshold: 0, cardFooter: 'dsh', fontFiles: [], fontFamilies: [],

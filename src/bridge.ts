@@ -26,7 +26,7 @@ import { buildChatId, classifyUserRole, splitChatId } from './chat.js'
 import type { AccessPolicyConfig } from './chat.js'
 import { buildPlatformPrompt } from './prompt.js'
 import { registerTools } from './tools.js'
-import { tryHandleCommand as routeCommand, type CommandContext } from './commands.js'
+import { tryHandleCommand as routeCommand, STEER_ACCEPTED_NOTICE, type CommandContext } from './commands.js'
 import { relayHostCards as relayCards, type CardRelayContext } from './card-relay.js'
 import { OutboundPipeline } from './outbound.js'
 import type { OutboundSegment, SendOptions } from './outbound.js'
@@ -43,6 +43,12 @@ import type { InjectChannel } from './inject.js'
 import type { InboundRecorder } from './record.js'
 import { healthReport, exportDiagnostics, redactSnapshot } from './health.js'
 import type { HealthDeps } from './health.js'
+/** T2 (P1): the queue notice sent to a chat when a message arrives while its
+ * task is running under the default 'queue' policy — at most ONE per running
+ * turn (the flag resets at turn/end) so a burst of queued messages never
+ * spams the chat. Exported for the deterministic text wait in tests. */
+export const QUEUE_NOTICE_TEXT = '⏳ 当前任务运行中，新消息已排队，将在当前任务结束后依次处理。'
+
 /** Resolved runtime configuration for the bridge. */
 export interface BridgeConfig {
   botQQ: string
@@ -83,6 +89,20 @@ export interface BridgeConfig {
    * inbound message (0 disables; default 7). Evicted chats keep their
    * chat→session mapping, so a later message resumes the same session. */
   chatIdleEvictDays?: number
+  /** T2 (P1): how a new ordinary message is handled while the chat's task
+   * (agent turn) is running; absent → 'queue' (the default). 'queue' = the
+   * message keeps the 0.8.1 dispatch path (agent.followup queues it as the
+   * next turn — consumed AFTER the current turn ends, in arrival order) and
+   * the chat gets at most one queue notice per running turn; 'steer' = plain
+   * text (no media/quote/forward, non-restricted senders) is submitted as a
+   * supplementary instruction into the running turn via the same
+   * agent.steer kernel as steerTranscript, with a per-message submit notice. */
+  newMessagePolicy?: 'queue' | 'steer'
+  /** T9-B (用户裁决 2026-10-12)：steer 模式下自动插话的发送者资格档位；
+   * absent → 'admin'（缺省）。'admin' = 仅管理员可自动插话；'all' = 所有
+   * 非受限发送者均可。不改变 /steer 命令（始终仅管理员）与 queue 模式行为，
+   * 也不放宽受限用户软限制（受限消息任何档都排队）。 */
+  autoSteerPolicy?: 'admin' | 'all'
 }
 
 /** W1 trace/config extensions: the observability knobs ride as optional
@@ -259,6 +279,10 @@ export class ChatBridge {
    * agent reply even with tracing off). Cleared by a real dispatch to the
    * chat or when the chat is removed. */
   private readonly injectRoundByChat = new Map<ChatId, string>()
+  /** T2 (P1): chats that already got the QUEUE_NOTICE_TEXT for their current
+   * running turn (one notice per turn; cleared at turn/end and on chat
+   * removal — bounded by the chat population). */
+  private readonly queueNoticeChats = new Set<ChatId>()
   /** Plugin version + git commit, read once for /ver. */
   private pluginVersion: string | undefined
   private pluginCommit: string | undefined
@@ -282,6 +306,7 @@ export class ChatBridge {
         this.deps.config.inject?.clearChat(chat.chatId)
         this.traceByChat.delete(chat.chatId)
         this.injectRoundByChat.delete(chat.chatId)
+        this.queueNoticeChats.delete(chat.chatId)
       },
       installChannelScope: agentCtx => this.installChannelScope(agentCtx),
     })
@@ -312,10 +337,11 @@ export class ChatBridge {
       media: deps.media,
       transcriber: deps.transcriber,
       steerTranscript: (chatId, text) => this.steerTranscript(chatId, text),
-      tryHandleCommand: (chatId, text, userId) => this.tryHandleCommand(chatId, text, userId),
+      tryHandleCommand: (chatId, text, userId, nickname) => this.tryHandleCommand(chatId, text, userId, nickname),
       buildBody: (text, media, chatId) => this.buildBody(text, media, chatId),
       expandQuote: messageId => this.expandQuote(messageId),
       dispatchFollowup: (chatId, text, role, nickname) => this.dispatchFollowup(chatId, text, role, nickname),
+      interceptBusyTurn: (chatId, text, role, nickname, plain) => this.interceptBusyTurn(chatId, text, role, nickname, plain),
       sendToChat: (chatId, text) => this.sendToChat(chatId, text),
       log: (level, message) => this.deps.log(level, message),
       config: deps.config,
@@ -611,10 +637,11 @@ export class ChatBridge {
    * @param chatId - the chat the command arrived in.
    * @param text - parsed inbound text.
    * @param userId - sender QQ number.
+   * @param nickname - sender display name (pre-sanitized; T9-A /steer boundary).
    * @returns true when the message was consumed by a command.
    */
-  private tryHandleCommand(chatId: ChatId, text: string, userId: string): Promise<boolean> {
-    return routeCommand(this.commandCtx, chatId, text, userId)
+  private tryHandleCommand(chatId: ChatId, text: string, userId: string, nickname?: string): Promise<boolean> {
+    return routeCommand(this.commandCtx, chatId, text, userId, nickname)
   }
 
   /**
@@ -632,6 +659,9 @@ export class ChatBridge {
       hasChat: chatId => bridge.chats.has(chatId),
       resetChat: chatId => bridge.resetChat(chatId),
       dispatchFollowup: (chatId, text, role, nickname) => bridge.dispatchFollowup(chatId, text, role, nickname),
+      // T2 (P1): /steer — the bridge-owned steer core keeps the createUserMessage
+      // source write point in bridge.ts (producer-owned kind, session-v4 guard).
+      steerRunningTurn: (chatId, text) => bridge.steerMessage(chatId, text),
       effectiveCwd: chatId => bridge.effectiveCwd(chatId),
       sessionIdFromMapping: chatId => bridge.sessionIdFromMapping(chatId),
       resolvePresetId: chatId => bridge.resolvePresetId(chatId),
@@ -706,16 +736,79 @@ export class ChatBridge {
    * running turn consumes it at its nearest step boundary; an idle agent
    * opens a turn. No live chat (dispatch dropped/never happened) drops it. */
   private steerTranscript(chatId: ChatId, text: string): void {
+    if (this.steerMessage(chatId, transcriptLabel(text))) return
+    this.deps.log('debug', 'voice transcript dropped (no live chat): ' + chatId)
+    currentTrace()?.emit('dispatch', { ok: false, reason: TRACE_REASONS.transcriptNoChat })
+  }
+
+  /** T2 (P1): the single agent.steer write point — one createUserMessage with
+   * the producer-owned source kind (the session-v4 guard counts the source
+   * write points; this and dispatchFollowup are the only two). Shared by the
+   * voice transcript path (steerTranscript), the 'steer' policy and /steer.
+   * Returns false when the chat has no live agent (nothing was steered). */
+  private steerMessage(chatId: ChatId, text: string): boolean {
     const chat = this.chats.get(chatId)
-    if (chat === undefined) {
-      this.deps.log('debug', 'voice transcript dropped (no live chat): ' + chatId)
-      currentTrace()?.emit('dispatch', { ok: false, reason: TRACE_REASONS.transcriptNoChat })
-      return
-    }
+    if (chat === undefined) return false
     chat.agent.steer(createUserMessage({
-      content: [{ type: 'text', text: transcriptLabel(text) }],
+      content: [{ type: 'text', text }],
       source: { kind: 'plugin:dsh-onebot' },
     }))
+    return true
+  }
+
+  /**
+   * T2 (P1): the busy-turn policy seam (inbound ctx.interceptBusyTurn).
+   * Called for every non-command message AFTER all gates, only when deciding
+   * what to do with it while the chat's task is running:
+   * - no running turn → false (caller dispatches normally; the 0.8.1 path,
+   *   byte-identical — also the path for newMessagePolicy缺省 idle traffic);
+   * - 'steer' policy + plain text + non-restricted sender + autoSteerPolicy
+   *   eligibility ('admin' 档缺省 = 仅管理员；'all' 档不限，T9-B 用户裁决
+   *   2026-10-12) → the message is submitted into the running turn via the
+   *   steerMessage kernel (consumed at the nearest step boundary, NO new turn)
+   *   and a submit notice goes out;
+   * - otherwise (queue policy default / media-quote-forward message /
+   *   restricted group member / 不具备自动插话资格) → the 0.8.1 dispatch path
+   *   (agent.followup queues it as the next turn: consumed after the current
+   *   turn ends, in arrival order) plus the queue notice at most once per
+   *   running turn.
+   * The running check reads the agent's own lifecycle state — the same
+   * authoritative signal /stop uses; chat.busy (turn/start..turn/end view)
+   * can lag the host driver and is deliberately NOT consulted.
+   */
+  private async interceptBusyTurn(chatId: ChatId, text: string, role: UserRole, nickname: string | undefined, plain: boolean): Promise<boolean> {
+    const chat = this.chats.get(chatId)
+    if (chat === undefined || chat.agent.status !== 'running') return false
+    // The restricted-member soft limit ([受限用户:仅问答]) is never widened by
+    // the steer policy: restricted senders' messages queue like everyone
+    // else's media. The condition mirrors the RESTRICTED_PREFIX application
+    // in the inbound pipeline (group + non-admin + restrictedMemberPrefix).
+    const restricted = splitChatId(chatId).kind === 'group'
+      && role !== 'admin' && this.deps.config.restrictedMemberPrefix
+    // T9-B: auto-steer eligibility (user ruling 2026-10-12) — 'admin' (缺省)
+    // = admins only; 'all' = anyone. Restricted members stay excluded under
+    // both; /steer remains admin-only regardless of this knob; queue mode is
+    // untouched.
+    const autoSteerAllowed = (this.deps.config.autoSteerPolicy ?? 'admin') === 'all' || role === 'admin'
+    if ((this.deps.config.newMessagePolicy ?? 'queue') === 'steer' && plain && !restricted && autoSteerAllowed) {
+      this.steerMessage(chatId, text)
+      currentTrace()?.emit('dispatch', { ok: true, reason: TRACE_REASONS.busyTurnSteered })
+      this.sendToChat(chatId, STEER_ACCEPTED_NOTICE).catch((error: unknown) => {
+        this.deps.log('debug', '插话提交提示发送失败: ' + describeError(error))
+        currentTrace()?.emit('notice', { ok: false, reason: '插话提交提示发送失败: ' + describeError(error) })
+      })
+      return true
+    }
+    await this.dispatchFollowup(chatId, text, role, nickname)
+    currentTrace()?.emit('dispatch', { ok: true, reason: TRACE_REASONS.busyTurnQueued })
+    if (!this.queueNoticeChats.has(chatId)) {
+      this.queueNoticeChats.add(chatId)
+      this.sendToChat(chatId, QUEUE_NOTICE_TEXT).catch((error: unknown) => {
+        this.deps.log('debug', '排队提示发送失败: ' + describeError(error))
+        currentTrace()?.emit('notice', { ok: false, reason: '排队提示发送失败: ' + describeError(error) })
+      })
+    }
+    return true
   }
 
   /** Expand a quoted (reply) message into [引用] text via get_msg. */
@@ -876,6 +969,9 @@ export class ChatBridge {
       this.stopTyping(chat)
       chat.lastActivityAt = Date.now()
       chat.busy = false
+      // T2 (P1): the turn that armed the queue notice is over — a later
+      // running turn notifies again.
+      this.queueNoticeChats.delete(chatId)
       this.deps.log('info', 'turn/end for ' + chatId + ': ' + event.data.reason.kind)
       // Durable: flush the session so a later restart can resume it.
       void this.deps.sessions.flush(chat.agent.session).catch((error: unknown) => {

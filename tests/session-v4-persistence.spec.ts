@@ -2,7 +2,8 @@
  * Session v4 producer-owned source kind 持久化回归测试（P0/T1）。
  *
  * 审计结论（docs/v4-source-audit.md）：全仓经宿主 API 写会话 source 的形态
- * 收敛于 src/bridge.ts:550（dispatchFollowup）与 :717（steerTranscript）两点，
+ * 收敛于 src/bridge.ts:576（dispatchFollowup）与 :754（steerMessage 内核，
+ * T2 起共用；steerTranscript//steer/steer 策略都经它）两点，
  * 均为 `source: { kind: 'plugin:dsh-onebot' }`。本测试用真管线 harness（真实
  * ChatBridge + 反向 WS 入站）在四条路径上固化该结论，并在「持久化-重读-再写入」
  * 循环与真实宿主 v4 准入函数上断言 kind 不漂移：
@@ -199,7 +200,7 @@ describe('session v4 producer-owned source kind（持久化回归）', () => {
     try {
       h.sendText('先建立会话')
       await vi.waitFor(() => expect(h.captured).toHaveLength(1))
-      // steerTranscript 是私有方法（bridge.ts:708），类型上经桥接访问 —— 运行时为原型方法
+      // steerTranscript 是私有方法（bridge.ts:738，T2 起委托 :749 的 steerMessage 内核），类型上经桥接访问 —— 运行时为原型方法
       const chatId = [...(h.bridge as unknown as { chats: Map<string, unknown> }).chats.keys()][0]
       expect(chatId).toBeDefined()
       ;(h.bridge as unknown as { steerTranscript: (chatId: string, text: string) => void })
@@ -301,7 +302,7 @@ describe('session v4 producer-owned source kind（持久化回归）', () => {
         }
       })
     }
-    // 恰为审计收口的两处写入点（bridge.ts:550/717），且全部携带 producer-owned kind
+    // 恰为审计收口的两处写入点（bridge.ts:576/754，T9-C 行号同步），且全部携带 producer-owned kind
     expect(matches.length).toBeGreaterThanOrEqual(2)
     for (const m of matches) {
       expect(m.file === 'bridge.ts' || m.file === 'commands.ts' || m.file === 'trace.ts' || m.file === 'record.ts' || m.file === 'measure.ts',

@@ -651,13 +651,13 @@ describe('commands', () => {
     await h.connection.stop()
   }, 60_000)
 
-  it('command table registers exactly the 17 routed commands, one row each, and /help renders the grouped card from the table (D1-PR1)', () => {
+  it('command table registers exactly the 18 routed commands, one row each, and /help renders the grouped card from the table (D1-PR1)', () => {
     // Row order = the /help line order inside each group; the router matches
     // by name so ordering is routing-neutral. Adding a command is exactly one
     // row here (group + usage-style help) — /help picks it up for free.
-    expect(COMMANDS.map(c => c.name)).toEqual(['new', 'stop', 'model', 'workspace', 'preset', 'session', 'status', 'healthcheck', 'retry', 'id', 'ver', 'ocr', 'mode', 'plan', 'permission', 'goal', 'help'])
-    expect(COMMANDS).toHaveLength(17)
-    expect(new Set(COMMANDS.map(c => c.name)).size).toBe(17)
+    expect(COMMANDS.map(c => c.name)).toEqual(['new', 'stop', 'steer', 'model', 'workspace', 'preset', 'session', 'status', 'healthcheck', 'retry', 'id', 'ver', 'ocr', 'mode', 'plan', 'permission', 'goal', 'help'])
+    expect(COMMANDS).toHaveLength(18)
+    expect(new Set(COMMANDS.map(c => c.name)).size).toBe(18)
     for (const c of COMMANDS) {
       expect(c.adminOnly).toBe(true)
       expect(c.help).not.toContain('\n')
@@ -686,6 +686,7 @@ describe('commands', () => {
       '/ver 插件版本',
       '▍操作',
       '/stop 停止当前生成',
+      '/steer <补充内容> 向运行中的任务补充指令',
       '/retry 重跑上一条',
       '/ocr 识别最近一张图片',
       '▍其他',

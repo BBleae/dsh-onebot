@@ -5,8 +5,8 @@
  * window.__ModuleLoader__）的模块级契约：
  *   ① 语法可解析（new Function）+ CJS banner/footer 形态 + externals 仅 react；
  *   ② 入口导出 inject + apply；
- *   ③ 四组 26 键：分组/键集/默认值与宿主侧 src/settings-remote.js（T3 + W6 扩展
- *      + W7 workspacePath）导出常量逐字一致（descriptor 契约核对，防两侧漂移）；
+ *   ③ 四组 28 键：分组/键集/默认值与宿主侧 src/settings-remote.js（T3 + W6 扩展
+ *      + W7 workspacePath + T2 newMessagePolicy + T9 autoSteerPolicy）导出常量逐字一致（descriptor 契约核对，防两侧漂移）；
  *      诊断组 6 键文案为中文标签 + 一句话「关掉会怎样」+ 配置键名（W6）；
  *   ④ Typert descriptor 与 T3 服务方法面逐字对齐：getSettings() /
  *      updateSettings(patch, expectedRevision) / listWorkspaces()（W7），全
@@ -159,7 +159,7 @@ describe('T4 客户端 bundle — descriptor 契约核对（与 T3 src/settings-
     expect(() => getSettings.result.schema.parse({ revision: 0, entryActive: true, config: SCHEMA_DEFAULTS, secrets: [], groups: SETTINGS_GROUPS, effect: 'none' })).toThrow()
   })
 
-  it('updateSettings patch codec 接受 26 键任意子集、拒绝非法枚举值', () => {
+  it('updateSettings patch codec 接受 28 键任意子集、拒绝非法枚举值', () => {
     const updateSettings = descriptors[1] as { parameters: Array<{ codec: { schema: { parse(value: unknown): unknown } } }> }
     const patchCodec = updateSettings.parameters[0].codec.schema
     expect(patchCodec.parse({ port: 1234 })).toEqual({ port: 1234 })
@@ -169,12 +169,12 @@ describe('T4 客户端 bundle — descriptor 契约核对（与 T3 src/settings-
   })
 })
 
-describe('T4 客户端 bundle — 四组 26 键（分组/键集/默认值 = T1 §4 表 + W6 诊断组 + W7 workspacePath = T3 常量）', () => {
+describe('T4 客户端 bundle — 四组 28 键（分组/键集/默认值 = T1 §4 表 + W6 诊断组 + W7 workspacePath + T2 newMessagePolicy + T9 autoSteerPolicy = T3 常量）', () => {
   it('分组与键序逐字对齐 host SETTINGS_GROUPS', () => {
     expect(client.GROUP_KEYS).toEqual(SETTINGS_GROUPS)
     expect(groups.map((group) => group.id)).toEqual(['connection', 'permissions', 'behavior', 'diagnostics'])
     expect(allFields.map((field) => field.key).sort()).toEqual([...ALL_KEYS].sort())
-    expect(allFields).toHaveLength(26)
+    expect(allFields).toHaveLength(28) // T2 26→27（newMessagePolicy 入 behavior 组）、T9 27→28（autoSteerPolicy）
   })
 
   it('默认值逐字对齐 host SCHEMA_DEFAULTS（重置按钮唯一来源）', () => {
@@ -197,6 +197,8 @@ describe('T4 客户端 bundle — 四组 26 键（分组/键集/默认值 = T1 �
     expect(enumField('dmPolicy')?.options).toEqual(['open', 'allowlist', 'disabled'])
     expect(enumField('groupPolicy')?.options).toEqual(['open', 'allowlist', 'disabled'])
     expect(enumField('unknownCommand')?.options).toEqual(['intercept', 'passthrough'])
+    expect(enumField('newMessagePolicy')?.options).toEqual(['queue', 'steer'])
+    expect(enumField('autoSteerPolicy')?.options).toEqual(['admin', 'all']) // T9：枚举与宿主 ENUM_KEYS 同宽
   })
 
   it('分组标题与字段 label 为中文（T4 要求）', () => {
@@ -224,13 +226,13 @@ describe('T4 客户端 bundle — 渲染函数模块级可测（renderGroup 纯�
     }))
   }
 
-  it('四组各产出标题与逐字段控件行（26 行 obx-field）', () => {
+  it('四组各产出标题与逐字段控件行（28 行 obx-field）', () => {
     const sections = renderAll(draft({ config: SCHEMA_DEFAULTS }))
     expect(sections.map((section) => (section.props as Record<string, unknown>)['data-group'])).toEqual(['connection', 'permissions', 'behavior', 'diagnostics'])
     const titles = sections.map((section) => ((section.children[0] as StubElement).children[0] as string))
     expect(titles).toEqual(['连接', '权限', '行为', '诊断'])
     const fieldRows = sections.flatMap((section) => walk(section).filter((element) => element.type === 'div' && element.props.className === 'obx-field'))
-    expect(fieldRows).toHaveLength(26)
+    expect(fieldRows).toHaveLength(28)
   })
 
   it('控件类型齐备：4 枚举下拉 + 3 多行文本 + 11 布尔勾选 + 5 文本框 + 1 密码框（secret 另含清除勾选）', () => {
@@ -238,7 +240,7 @@ describe('T4 客户端 bundle — 渲染函数模块级可测（renderGroup 纯�
     const inputs = elements.filter((element) => element.type === 'input') as Array<StubElement & { props: Record<string, unknown> }>
     const selects = elements.filter((element) => element.type === 'select')
     const textareas = elements.filter((element) => element.type === 'textarea')
-    expect(selects).toHaveLength(4)
+    expect(selects).toHaveLength(6) // 5 原有枚举（mode/dmPolicy/groupPolicy/unknownCommand/newMessagePolicy）+ T9 autoSteerPolicy
     expect(textareas).toHaveLength(3)
     expect(inputs.filter((input) => input.props.type === 'checkbox')).toHaveLength(11 + 1) // 11 布尔（5 原有 + 6 W6）+ secret 清除勾选
     expect(inputs.filter((input) => input.props.type === 'text')).toHaveLength(7) // host/port/url/botQQ/workspacePath（W7）+ interimRecallMs/rateLimitPerMinute（number 以文本框渲染）
@@ -274,7 +276,7 @@ describe('T4 客户端 bundle — 保存语义（updateSettings(patch, expectedR
     opts?: { secretDraft?: string; clearSecret?: boolean },
   ) => { patch: Record<string, unknown>; invalidKeys: string[] }
 
-  it('仅下发与生效值有差异的键（26 键任意子集）', () => {
+  it('仅下发与生效值有差异的键（28 键任意子集）', () => {
     const values = draft({ config: SCHEMA_DEFAULTS })
     values.port = '9999'
     values.mode = 'forward'
@@ -425,7 +427,7 @@ describe('W6 失败守卫（客户端侧）— host edit-failed 中文错误可�
     expect(isConflictError({ code: 'onebot-settings/conflict', message: 'expectedRevision mismatch' })).toBe(true)
   })
 
-  it('host patch 白名单 26 键与 client patchSchema 同宽：新键可下发（契约同步核对）', () => {
+  it('host patch 白名单 28 键与 client patchSchema 同宽：新键可下发（契约同步核对）', () => {
     const updateSettings = descriptors[1] as { parameters: Array<{ codec: { schema: { parse(value: unknown): unknown } } }> }
     const patch = updateSettings.parameters[0].codec.schema.parse({
       actionAuditEnabled: true, traceEnabled: false, recordInbound: true, inboxRedact: false, injectEnabled: false, injectDryRun: true,

@@ -91,6 +91,8 @@ export const TRACE_REASONS = {
   inboundRateLimited: '消息频率超限，已丢弃',
   inboundRateNoticeFailed: '限流提示发送失败',
   inboundEmptyContent: '消息展开后无有效文本内容，已丢弃',
+  busyTurnQueued: '任务运行中，新消息已入队等待当前回合结束',
+  busyTurnSteered: '任务运行中，新消息已作为补充指令插话',
   mediaResolveFailed: '媒体解析失败，占位符保留原文',
   nasFileTooLarge: 'QQ 文件超过大小上限，已跳过获取',
   nasFileFailed: 'QQ 文件获取失败：无可用来源',

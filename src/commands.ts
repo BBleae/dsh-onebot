@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path'
 
 import type { OneBotConnection } from './connection.js'
 import type { MediaRef } from './cq.js'
-import { RESTRICTED_PREFIX, type ChatId, type UserRole } from './chat.js'
+import { RESTRICTED_PREFIX, type ChatId, type UserRole, wrapUserMessage } from './chat.js'
 import type { PendingSelection, SessionSwitchOutcome, SwitchableSession } from './registry.js'
 import { fileToBase64 } from './media.js'
 import type { AgentDefaultModelLike, AgentPresetsLike, BridgeConfig, BridgeDeps, LlmCatalogPort, SessionPersistenceLike, SessionPreviewEvent, SessionReadHandleLike, WorkspaceRegistryLike } from './bridge.js'
@@ -54,6 +54,10 @@ export interface CommandContext {
   /** Registry capabilities the commands legitimately trigger. */
   resetChat(chatId: ChatId): Promise<void>
   dispatchFollowup(chatId: ChatId, text: string, role: UserRole, nickname?: string): Promise<void>
+  /** T2 (P1): /steer — the bridge-owned steer core (agent.steer with the
+   * producer-owned source kind; the createUserMessage write point stays in
+   * bridge.ts). Returns false when the chat has no live agent. */
+  steerRunningTurn(chatId: ChatId, text: string): boolean
   /** Per-chat state readers/writers (the pre-split private maps). */
   effectiveCwd(chatId: ChatId): string
   sessionIdFromMapping(chatId: ChatId): Promise<string | undefined>
@@ -105,6 +109,17 @@ export interface CommandContext {
   config: Pick<BridgeConfig, 'interimMessages' | 'maxImageBytes' | 'unknownCommand'>
 }
 
+/** T9-A: the sender identity the inbound pipeline already resolved for the
+ * command message — threaded through tryHandleCommand so /steer can wrap its
+ * argument in the same <user_message> boundary as every inbound payload
+ * (M3-D5 invariant: all user content enters the prompt behind the boundary).
+ * The nickname is the pre-sanitized value from inbound.ts; wrapUserMessage
+ * re-sanitizes defensively. */
+export interface CommandSender {
+  userId: string
+  nickname: string
+}
+
 /** One routed slash command: the table row IS the registration (D1-PR1) —
  * adding a command is exactly one row here and /help picks it up for free. */
 export interface CommandDefinition {
@@ -120,7 +135,7 @@ export interface CommandDefinition {
    * one fall into 「其他」; a group outside the fixed card order still renders
    * (appended), so a new row always shows up in the card. */
   group?: string
-  handler(ctx: CommandContext, chatId: ChatId, arg: string): Promise<void>
+  handler(ctx: CommandContext, chatId: ChatId, arg: string, sender: CommandSender): Promise<void>
 }
 
 /** The routed command table. Row order = the /help line order inside each
@@ -131,6 +146,7 @@ export const COMMANDS: CommandDefinition[] = [
     await ctx.resetChat(chatId)
   } },
   { name: 'stop', adminOnly: true, group: '操作', help: '停止当前生成', handler: (ctx, chatId) => handleStopCommand(ctx, chatId) },
+  { name: 'steer', adminOnly: true, group: '操作', help: '<补充内容> 向运行中的任务补充指令', handler: (ctx, chatId, arg, sender) => handleSteerCommand(ctx, chatId, arg, sender) },
   { name: 'model', adminOnly: true, group: '其他', help: '[--default] <provider> <model> 切换模型（--default 改部署默认；无参两级序号列表）', handler: (ctx, chatId, arg) => handleModelCommand(ctx, chatId, arg) },
   { name: 'workspace', adminOnly: true, group: '会话', help: '[路径|序号|list] 查看或切换工作区', handler: (ctx, chatId, arg) => handleWorkspaceCommand(ctx, chatId, arg) },
   { name: 'preset', adminOnly: true, group: '会话', help: '[id|序号] 查看/切换 agent 预设', handler: (ctx, chatId, arg) => handlePresetCommand(ctx, chatId, arg) },
@@ -220,9 +236,11 @@ function editDistanceWithin2(a: string, b: string): boolean {
  * @param chatId - the chat the command arrived in.
  * @param text - parsed inbound text.
  * @param userId - sender QQ number.
+ * @param nickname - sender display name (pre-sanitized by inbound.ts); used
+ *   by /steer for the <user_message> boundary attribute (T9-A).
  * @returns true when the message was consumed by a command.
  */
-export async function tryHandleCommand(ctx: CommandContext, chatId: ChatId, text: string, userId: string): Promise<boolean> {
+export async function tryHandleCommand(ctx: CommandContext, chatId: ChatId, text: string, userId: string, nickname?: string): Promise<boolean> {
   const normalized = text.replace(/^@\d+\s*/, '')
   const first = (normalized.split(/\s+/, 1)[0] ?? '').trim()
   if (!/^\/[A-Za-z][A-Za-z0-9_-]*$/.test(first)) return false
@@ -249,7 +267,7 @@ export async function tryHandleCommand(ctx: CommandContext, chatId: ChatId, text
     }
     return false
   }
-  await command.handler(ctx, chatId, normalized.slice(first.length).trim())
+  await command.handler(ctx, chatId, normalized.slice(first.length).trim(), { userId, nickname: nickname ?? '' })
   return true
 }
 
@@ -266,6 +284,39 @@ async function handleStopCommand(ctx: CommandContext, chatId: ChatId): Promise<v
   } else {
     await ctx.sendToChat(chatId, '当前没有正在进行的生成。')
   }
+}
+
+/** T2 (P1): the /steer submit notice — one line per accepted instruction.
+ * Shared with the bridge's auto-steer path ('steer' policy) so both surfaces
+ * word the confirmation identically; exported for the deterministic text
+ * wait in tests. */
+export const STEER_ACCEPTED_NOTICE = '✅ 已作为补充指令提交给当前任务，模型将在下一步读取。'
+
+/** T2 (P1): the /steer usage hint — replied whenever the command cannot
+ * steer (empty argument, no live chat, or no running task). Never crashes,
+ * never silently no-ops. */
+export const STEER_USAGE_HINT = '用法：/steer <补充内容> —— 在任务运行期间向当前任务追加一条补充指令，模型会在下一步读取；当前没有运行中的任务，直接发送消息即可开始新任务。'
+
+/** T2 (P1) /steer: steer one supplementary instruction into the RUNNING
+ * turn (both newMessagePolicy modes — an explicit /steer is always allowed).
+ * Without a running task (or with an empty argument, or no live chat) it
+ * replies with the usage hint instead of steering — the idle-driver steer
+ * would otherwise open a turn, which is what plain messages already do.
+ * T9-A: the argument enters the prompt wrapped in the same <user_message>
+ * boundary as every inbound payload (same wrapUserMessage shape, qq +
+ * nickname attributes) — /steer is admin-gated (trusted sender) but the
+ * boundary posture must not fork between the two steerMessage callers. */
+async function handleSteerCommand(ctx: CommandContext, chatId: ChatId, arg: string, sender: CommandSender): Promise<void> {
+  const raw = arg.trim()
+  const text = raw === '' ? '' : wrapUserMessage(raw, sender.userId, sender.nickname)
+  const chat = ctx.getChat(chatId)
+  if (text === '' || chat === undefined || chat.agent.status !== 'running' || !ctx.steerRunningTurn(chatId, text)) {
+    ctx.log('debug', 'slash /steer rejected (no running task or empty argument) for ' + chatId)
+    await ctx.sendToChat(chatId, STEER_USAGE_HINT)
+    return
+  }
+  ctx.log('info', 'slash /steer for ' + chatId)
+  await ctx.sendToChat(chatId, STEER_ACCEPTED_NOTICE)
 }
 
 /** R2: TTL of a pending serial-number selection — judged lazily at the next
