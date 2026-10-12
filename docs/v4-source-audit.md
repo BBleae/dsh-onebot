@@ -12,10 +12,12 @@
 
 | # | 写入点 | 形态 |
 |---|--------|------|
-| 1 | `src/bridge.ts:550` | `chat.agent.followup(createUserMessage({ content, source: { kind: 'plugin:dsh-onebot' } }))` |
-| 2 | `src/bridge.ts:717` | `chat.agent.steer(createUserMessage({ content, source: { kind: 'plugin:dsh-onebot' } }))` |
+| 1 | `src/bridge.ts:576` | `chat.agent.followup(createUserMessage({ content, source: { kind: 'plugin:dsh-onebot' } }))` |
+| 2 | `src/bridge.ts:754` | `chat.agent.steer(createUserMessage({ content, source: { kind: 'plugin:dsh-onebot' } }))` |
 
-机器可验证据：`grep -rn "source:" src/` 的命中中，除上述两行外仅有 4 类非会话命中——`src/t2i/measure.ts:22,35,42,57,150`（宽度来源 `WidthSource` 参数/注释）、`src/trace.ts:353` 与 `src/record.ts:298`（`// missing source: nothing to shift` 注释）、`src/commands.ts:779`（`isRealUserMessageSource` 的**只读**判定函数）。其余 `kind:` 命中均为 t2i parser/inbound 内部数据结构，与会话持久化无关。
+机器可验证据：`grep -rn "source:" src/` 的命中中，除上述两行外仅有 4 类非会话命中——`src/t2i/measure.ts:22,35,42,57,150`（宽度来源 `WidthSource` 参数/注释）、`src/trace.ts:353` 与 `src/record.ts:298`（`// missing source: nothing to shift` 注释）、`src/commands.ts:830`（`isRealUserMessageSource` 的**只读**判定函数）。其余 `kind:` 命中均为 t2i parser/inbound 内部数据结构，与会话持久化无关。
+
+> 行号同步（T9-C）：写点行号钉死于 T9 修复后实测（T2 重构 + T9-A/B 改动后）`:576`（`dispatchFollowup`）与 `:754`（`steerMessage` 内核）。
 
 ## 2. 宿主 v4 准入线（行号钉死，只读取证）
 
@@ -35,16 +37,16 @@
 
 | 路径 | 证据（file:line） | 会话写入形态 | 结论 |
 |------|------------------|--------------|------|
-| ① 普通入站 dispatch | `src/bridge.ts:548-551`（`dispatchFollowup` → `chat.agent.followup(createUserMessage({…, source}))`） | 写 user/message 行，`kind: 'plugin:dsh-onebot'` | **收敛**（写入点 1） |
-| ② steer 补递（语音转写插话） | `src/bridge.ts:715-718`（`steerTranscript` → `chat.agent.steer(createUserMessage({…, source}))`） | 写 user/message 行，`kind: 'plugin:dsh-onebot'` | **收敛**（写入点 2） |
-| ③ interim 中间消息 | `src/interim.ts` 全文（`onAssistantMessage`/`onTurnEnd` 仅**消费**会话事件 + 出站 send/recall）；`src/bridge.ts:845-859` 仅读事件路由 | 零写入；本回合唯一的插件行即 ① 的 dispatch 行 | **收敛**（经写入点 1） |
-| ④ inject 注入 | `src/inject.ts:6`（喂入**真实入站管线** → 复用 ① 的 dispatch 写点）；出站拦截层只拦 `send_*` 动作（`src/bridge.ts:550` 附近簿记 `injectRoundByChat`，`src/inject.ts:240` 拦 outbound action） | 经写入点 1；拦截层不触会话 | **收敛** |
+| ① 普通入站 dispatch | `src/bridge.ts:574-577`（`dispatchFollowup` → `chat.agent.followup(createUserMessage({…, source}))`） | 写 user/message 行，`kind: 'plugin:dsh-onebot'` | **收敛**（写入点 1） |
+| ② steer 补递（语音转写插话） | `src/bridge.ts:752-755`（T2 起收敛为 `steerMessage` 内核，`steerTranscript`/'steer' 策略//steer 共用 → `chat.agent.steer(createUserMessage({…, source}))`） | 写 user/message 行，`kind: 'plugin:dsh-onebot'` | **收敛**（写入点 2） |
+| ③ interim 中间消息 | `src/interim.ts` 全文（`onAssistantMessage`/`onTurnEnd` 仅**消费**会话事件 + 出站 send/recall）；`src/bridge.ts:922-983` 仅读事件路由 | 零写入；本回合唯一的插件行即 ① 的 dispatch 行 | **收敛**（经写入点 1） |
+| ④ inject 注入 | `src/inject.ts:6`（喂入**真实入站管线** → 复用 ① 的 dispatch 写点）；出站拦截层只拦 `send_*` 动作（`src/bridge.ts:593-594` 簿记 `injectRoundByChat`，`src/inject.ts:240` 拦 outbound action） | 经写入点 1；拦截层不触会话 | **收敛** |
 | ⑤ record 录制旁路 | `src/record.ts:269`（`appendFile` 只写 `mediaDir/qq-inbox.jsonl` 自有文件）；`src/record.ts:298` 无 source 写入 | 零宿主会话写入 | **收敛** |
 | ⑥ replay 回放 | `src/replay.ts:158-159`（自建 fake agent，`followup` 只 push 内存数组）；`src/replay.ts:102-103` 只读 inbox 文件 | 零宿主会话写入 | **收敛** |
 | ⑦ tools（qq_send 等） | `src/tools.ts:53,68`（只读 `exec.agent?.session.id`）；发送走 outbound 管线 | 零会话写入 | **收敛** |
 | ⑧ card-relay 卡片转发 | `src/card-relay.ts:29,36`（走 `ctx.sendToChat` 出站） | 零会话写入 | **收敛** |
 | ⑨ prompt 平台提示词 | `src/prompt.ts`（仅 system-prompt section 注册） | 零会话写入 | **收敛** |
-| ⑩ 宿主转发命令（/plan、/permission） | `src/commands.ts:1005`、`src/commands.ts:1066`（`commands.execute(chat.agent, …)`） | 行由**宿主命令运行时**自写（宿主自有 source）；插件侧零写入，宿主准入由 §2 准入线把关 | **收敛**（插件无准入义务） |
+| ⑩ 宿主转发命令（/plan、/permission） | `src/commands.ts:1056`、`src/commands.ts:1117`（`commands.execute(…)`） | 行由**宿主命令运行时**自写（宿主自有 source）；插件侧零写入，宿主准入由 §2 准入线把关 | **收敛**（插件无准入义务） |
 | ⑪ registry / outbound / stt / t2i / media / trace / health | `src/registry.ts:635`（`sessions.flush` 仅持久化冲刷）；其余模块纯出站/旁路 | 零会话写入 | **收敛** |
 
 ## 4. 兼容性注记（engines 全范围）
