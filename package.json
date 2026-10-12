@@ -99,6 +99,8 @@
   "scripts": {
     "build": "./scripts/build.sh",
     "test": "vitest run",
-    "replay": "node scripts/replay.mjs"
+    "replay": "node scripts/replay.mjs",
+    "verify:injected-context": "node scripts/verify-injected-context.mjs",
+    "verify:lan-management": "node scripts/verify-lan-management.mjs"
   }
 }
