@@ -94,14 +94,26 @@ export interface InboundContext {
     /** M3-D4c: deliver a completed voice transcript into the chat's agent
      * (bridge-owned: steers the running turn, or opens one when idle). */
     steerTranscript(chatId: ChatId, text: string): void;
-    /** Slash-command router (bridge facade: the command table's ctx lives there). */
-    tryHandleCommand(chatId: ChatId, text: string, userId: string): Promise<boolean>;
+    /** Slash-command router (bridge facade: the command table's ctx lives there).
+     * nickname (T9-A): pre-sanitized sender display name for the /steer
+     * <user_message> boundary attribute. */
+    tryHandleCommand(chatId: ChatId, text: string, userId: string, nickname?: string): Promise<boolean>;
     /** Message body assembly (bridge facade: overridable, see the pipeline-order test). */
     buildBody(text: string, media: MediaRef[], chatId: ChatId): Promise<string>;
     /** Quote (reply) expansion (bridge facade: overridable, see the pipeline-order test). */
     expandQuote(messageId: string): Promise<string>;
     /** Turn dispatch — bridge-owned orchestration (ensureChat + per-turn prefixes). */
     dispatchFollowup(chatId: ChatId, text: string, role: UserRole, nickname?: string): Promise<void>;
+    /** T2 (P1): busy-turn policy seam — invoked for every non-command message
+     * after ALL gates (dedup/policy/mention/media/rate-limit), right before the
+     * turn dispatch, so queue/steer can never bypass an existing gate. Returns
+     * true when the seam consumed the message (queued with a once-per-turn
+     * notice, or steered into the running turn); false = no running turn →
+     * dispatch normally (the 0.8.1 path, byte-identical). `plain` = the message
+     * carries no media, no quote and no forward (steer eligibility precondition:
+     * media-bearing messages always queue, never steer). Optional: absent =
+     * the pre-T2 pipeline (0.8.1 behavior for every message). */
+    interceptBusyTurn?(chatId: ChatId, text: string, role: UserRole, nickname: string | undefined, plain: boolean): Promise<boolean>;
     /** Outbound facade (the B7 rate-limit notice). */
     sendToChat(chatId: ChatId, text: string): Promise<string[]>;
     /** Bridge log line callback. */

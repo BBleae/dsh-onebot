@@ -109,6 +109,12 @@ export interface Config {
     requireMention: boolean;
     /** Unknown slash-command handling: intercept（默认）=拦截并给建议；passthrough=透传给模型。 */
     unknownCommand: 'intercept' | 'passthrough';
+    /** T2 (P1): 任务运行中的新消息处理策略：queue=排队（默认）；steer=插话进当前任务。 */
+    newMessagePolicy: 'queue' | 'steer';
+    /** T9-B (用户裁决 2026-10-12)：steer 模式下自动插话资格：admin=仅管理员（默认）；all=不限。 */
+    autoSteerPolicy: 'admin' | 'all';
+    /** T3 (P2): 等待模型回复超时阈值（毫秒）——超时后登记补发跟踪、回合完成后向原聊天补发最终文字；0=关闭。 */
+    deferredTimeoutMs: number;
     dmPolicy: 'open' | 'allowlist' | 'disabled';
     groupPolicy: 'open' | 'allowlist' | 'disabled';
     allowFrom: string[];

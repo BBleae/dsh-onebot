@@ -13,6 +13,7 @@ import type { MediaRef } from './cq.js';
 import { type ChatId, type UserRole } from './chat.js';
 import type { PendingSelection, SessionSwitchOutcome, SwitchableSession } from './registry.js';
 import type { AgentDefaultModelLike, AgentPresetsLike, BridgeConfig, BridgeDeps, LlmCatalogPort, SessionPersistenceLike, SessionPreviewEvent, WorkspaceRegistryLike } from './bridge.js';
+import type { TraceStage } from './trace.js';
 /** Narrow view of a live chat the command handlers may read or mutate —
  * the structural subset of the bridge's internal ChatAgent that the
  * pre-split handlers actually touched. */
@@ -48,6 +49,13 @@ export interface CommandContext {
     /** Registry capabilities the commands legitimately trigger. */
     resetChat(chatId: ChatId): Promise<void>;
     dispatchFollowup(chatId: ChatId, text: string, role: UserRole, nickname?: string): Promise<void>;
+    /** T3 (P2): /stop — 显式终止该聊天的超时补发跟踪（pending 条目转
+     * cancelled，其他聊天不受影响）。无补发条目时为 no-op。 */
+    stopDeferredTracking(chatId: ChatId): void;
+    /** T2 (P1): /steer — the bridge-owned steer core (agent.steer with the
+     * producer-owned source kind; the createUserMessage write point stays in
+     * bridge.ts). Returns false when the chat has no live agent. */
+    steerRunningTurn(chatId: ChatId, text: string): boolean;
     /** Per-chat state readers/writers (the pre-split private maps). */
     effectiveCwd(chatId: ChatId): string;
     sessionIdFromMapping(chatId: ChatId): Promise<string | undefined>;
@@ -93,10 +101,26 @@ export interface CommandContext {
      * no health wiring — the command replies with a hint instead). */
     healthReport?: (() => Promise<string>) | undefined;
     /** W1/T5 /healthcheck export: pack the redacted diagnostics archive,
-     * returning its path. */
-    exportDiagnostics?: (() => Promise<string>) | undefined;
+     * returning its path. T4 (P3): the optional trigger reference is stamped
+     * into the archive file name (absent = the bridge's latest fault reference,
+     * or a reference-free name when none was recorded). */
+    exportDiagnostics?: ((triggerRef?: string) => Promise<string>) | undefined;
+    /** T4 (P3): command-plane failure reference entry (/retry dispatch throw).
+     * Mints an MF- reference through the bridge (registry + trace + structured
+     * log) and returns it for the ⚠️ notice tail. */
+    reportFailure?: ((chatId: ChatId, stage: TraceStage, detail: string) => string) | undefined;
     /** The only config fields the commands read. */
     config: Pick<BridgeConfig, 'interimMessages' | 'maxImageBytes' | 'unknownCommand'>;
+}
+/** T9-A: the sender identity the inbound pipeline already resolved for the
+ * command message — threaded through tryHandleCommand so /steer can wrap its
+ * argument in the same <user_message> boundary as every inbound payload
+ * (M3-D5 invariant: all user content enters the prompt behind the boundary).
+ * The nickname is the pre-sanitized value from inbound.ts; wrapUserMessage
+ * re-sanitizes defensively. */
+export interface CommandSender {
+    userId: string;
+    nickname: string;
 }
 /** One routed slash command: the table row IS the registration (D1-PR1) —
  * adding a command is exactly one row here and /help picks it up for free. */
@@ -113,7 +137,7 @@ export interface CommandDefinition {
      * one fall into 「其他」; a group outside the fixed card order still renders
      * (appended), so a new row always shows up in the card. */
     group?: string;
-    handler(ctx: CommandContext, chatId: ChatId, arg: string): Promise<void>;
+    handler(ctx: CommandContext, chatId: ChatId, arg: string, sender: CommandSender): Promise<void>;
 }
 /** The routed command table. Row order = the /help line order inside each
  * group (the router matches by name, so ordering is routing-neutral). */
@@ -137,9 +161,20 @@ export declare function helpText(): string;
  * @param chatId - the chat the command arrived in.
  * @param text - parsed inbound text.
  * @param userId - sender QQ number.
+ * @param nickname - sender display name (pre-sanitized by inbound.ts); used
+ *   by /steer for the <user_message> boundary attribute (T9-A).
  * @returns true when the message was consumed by a command.
  */
-export declare function tryHandleCommand(ctx: CommandContext, chatId: ChatId, text: string, userId: string): Promise<boolean>;
+export declare function tryHandleCommand(ctx: CommandContext, chatId: ChatId, text: string, userId: string, nickname?: string): Promise<boolean>;
+/** T2 (P1): the /steer submit notice — one line per accepted instruction.
+ * Shared with the bridge's auto-steer path ('steer' policy) so both surfaces
+ * word the confirmation identically; exported for the deterministic text
+ * wait in tests. */
+export declare const STEER_ACCEPTED_NOTICE = "\u2705 \u5DF2\u4F5C\u4E3A\u8865\u5145\u6307\u4EE4\u63D0\u4EA4\u7ED9\u5F53\u524D\u4EFB\u52A1\uFF0C\u6A21\u578B\u5C06\u5728\u4E0B\u4E00\u6B65\u8BFB\u53D6\u3002";
+/** T2 (P1): the /steer usage hint — replied whenever the command cannot
+ * steer (empty argument, no live chat, or no running task). Never crashes,
+ * never silently no-ops. */
+export declare const STEER_USAGE_HINT = "\u7528\u6CD5\uFF1A/steer <\u8865\u5145\u5185\u5BB9> \u2014\u2014 \u5728\u4EFB\u52A1\u8FD0\u884C\u671F\u95F4\u5411\u5F53\u524D\u4EFB\u52A1\u8FFD\u52A0\u4E00\u6761\u8865\u5145\u6307\u4EE4\uFF0C\u6A21\u578B\u4F1A\u5728\u4E0B\u4E00\u6B65\u8BFB\u53D6\uFF1B\u5F53\u524D\u6CA1\u6709\u8FD0\u884C\u4E2D\u7684\u4EFB\u52A1\uFF0C\u76F4\u63A5\u53D1\u9001\u6D88\u606F\u5373\u53EF\u5F00\u59CB\u65B0\u4EFB\u52A1\u3002";
 /** /session list-item preview bound, in code points (emoji-safe — see
  * truncatePreview). */
 export declare const SESSION_PREVIEW_MAX_CHARS = 40;

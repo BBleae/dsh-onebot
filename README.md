@@ -46,7 +46,7 @@
 | OneBot 11 实现 | NapCat / Lagrange / LLOneBot / go-cqhttp（reverse 或 forward WebSocket） |
 | 可选依赖 | 语音转写需 ffmpeg + whisper CLI；t2i 文字图在 Linux 需 Noto CJK 字体 |
 
-最后验证：2026-09-12（M4 交互与持久化：未知命令拦截 / 序号选择 / workspace 持久化——vitest 306 用例全绿、构建通过；M0 安全语义保持：reverse 空 token 拒绝启动、默认仅监听 127.0.0.1 为 BREAKING 变更，见下方配置表说明）。
+最后验证：2026-10-12（0.9.0 发版批次 W1–W3 五特性：v4 命令审计 / verify 体检脚本 / 排队插话+autoSteerPolicy / 超时补发 / 诊断参考号——npx tsc --noEmit 零错误、vitest 532 用例全绿；M0 安全语义保持：reverse 空 token 拒绝启动、默认仅监听 127.0.0.1 为 BREAKING 变更，见下方配置表说明）。
 
 ## 安装
 

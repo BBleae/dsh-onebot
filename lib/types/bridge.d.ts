@@ -19,6 +19,12 @@ import type { OutboundSegment, SendOptions } from './outbound.js';
 import type { TraceSink } from './trace.js';
 import type { InjectChannel } from './inject.js';
 import type { InboundRecorder } from './record.js';
+import type { TraceStage } from './trace.js';
+/** T2 (P1): the queue notice sent to a chat when a message arrives while its
+ * task is running under the default 'queue' policy — at most ONE per running
+ * turn (the flag resets at turn/end) so a burst of queued messages never
+ * spams the chat. Exported for the deterministic text wait in tests. */
+export declare const QUEUE_NOTICE_TEXT = "\u23F3 \u5F53\u524D\u4EFB\u52A1\u8FD0\u884C\u4E2D\uFF0C\u65B0\u6D88\u606F\u5DF2\u6392\u961F\uFF0C\u5C06\u5728\u5F53\u524D\u4EFB\u52A1\u7ED3\u675F\u540E\u4F9D\u6B21\u5904\u7406\u3002";
 /** Resolved runtime configuration for the bridge. */
 export interface BridgeConfig {
     botQQ: string;
@@ -59,6 +65,25 @@ export interface BridgeConfig {
      * inbound message (0 disables; default 7). Evicted chats keep their
      * chat→session mapping, so a later message resumes the same session. */
     chatIdleEvictDays?: number;
+    /** T2 (P1): how a new ordinary message is handled while the chat's task
+     * (agent turn) is running; absent → 'queue' (the default). 'queue' = the
+     * message keeps the 0.8.1 dispatch path (agent.followup queues it as the
+     * next turn — consumed AFTER the current turn ends, in arrival order) and
+     * the chat gets at most one queue notice per running turn; 'steer' = plain
+     * text (no media/quote/forward, non-restricted senders) is submitted as a
+     * supplementary instruction into the running turn via the same
+     * agent.steer kernel as steerTranscript, with a per-message submit notice. */
+    newMessagePolicy?: 'queue' | 'steer';
+    /** T9-B (用户裁决 2026-10-12)：steer 模式下自动插话的发送者资格档位；
+     * absent → 'admin'（缺省）。'admin' = 仅管理员可自动插话；'all' = 所有
+     * 非受限发送者均可。不改变 /steer 命令（始终仅管理员）与 queue 模式行为，
+     * 也不放宽受限用户软限制（受限消息任何档都排队）。 */
+    autoSteerPolicy?: 'admin' | 'all';
+    /** T3 (P2)：等待模型回复超时阈值（ms）——回合超过该时长没有任何模型输出
+     * 时提示超时并登记补发跟踪（deferred delivery），回合完成后向原聊天补发
+     * 最终文字（「（超时补发）」前缀，走既有 outbound 管线）；absent →
+     * 600000（保守 10 分钟），0 = 关闭超时补发。 */
+    deferredTimeoutMs?: number;
 }
 /** W1 trace/config extensions: the observability knobs ride as optional
  * members (same pattern as the W2-②③ gate keys) so the declared BridgeConfig
@@ -226,6 +251,13 @@ export declare class ChatBridge {
     /** Interim domain (D1-PR5): the assistant/message interim routing, the
      * per-message recall timers and the turn/end settlement. */
     private readonly interim;
+    /** T3 (P2): the deferred-delivery tracker (超时补发) — timeout timers, the
+     * JSONL registry, bounded send retries and restart recovery. */
+    private readonly deferred;
+    /** T4 (P3): the bounded registry of recent fault references — every minted
+     * QQ-CONN-/MF- number is recorded here for the /healthcheck report and the
+     * diagnostics archive file name. */
+    private readonly failureRefs;
     /** Live registry indexes — the inbound/outbound/interim/turn links keep
      * reading them through these same-name views. */
     private get chats();
@@ -246,6 +278,10 @@ export declare class ChatBridge {
      * agent reply even with tracing off). Cleared by a real dispatch to the
      * chat or when the chat is removed. */
     private readonly injectRoundByChat;
+    /** T2 (P1): chats that already got the QUEUE_NOTICE_TEXT for their current
+     * running turn (one notice per turn; cleared at turn/end and on chat
+     * removal — bounded by the chat population). */
+    private readonly queueNoticeChats;
     /** Plugin version + git commit, read once for /ver. */
     private pluginVersion;
     private pluginCommit;
@@ -349,6 +385,7 @@ export declare class ChatBridge {
      * @param chatId - the chat the command arrived in.
      * @param text - parsed inbound text.
      * @param userId - sender QQ number.
+     * @param nickname - sender display name (pre-sanitized; T9-A /steer boundary).
      * @returns true when the message was consumed by a command.
      */
     private tryHandleCommand;
@@ -371,6 +408,33 @@ export declare class ChatBridge {
      * running turn consumes it at its nearest step boundary; an idle agent
      * opens a turn. No live chat (dispatch dropped/never happened) drops it. */
     private steerTranscript;
+    /** T2 (P1): the single agent.steer write point — one createUserMessage with
+     * the producer-owned source kind (the session-v4 guard counts the source
+     * write points; this and dispatchFollowup are the only two). Shared by the
+     * voice transcript path (steerTranscript), the 'steer' policy and /steer.
+     * Returns false when the chat has no live agent (nothing was steered). */
+    private steerMessage;
+    /**
+     * T2 (P1): the busy-turn policy seam (inbound ctx.interceptBusyTurn).
+     * Called for every non-command message AFTER all gates, only when deciding
+     * what to do with it while the chat's task is running:
+     * - no running turn → false (caller dispatches normally; the 0.8.1 path,
+     *   byte-identical — also the path for newMessagePolicy缺省 idle traffic);
+     * - 'steer' policy + plain text + non-restricted sender + autoSteerPolicy
+     *   eligibility ('admin' 档缺省 = 仅管理员；'all' 档不限，T9-B 用户裁决
+     *   2026-10-12) → the message is submitted into the running turn via the
+     *   steerMessage kernel (consumed at the nearest step boundary, NO new turn)
+     *   and a submit notice goes out;
+     * - otherwise (queue policy default / media-quote-forward message /
+     *   restricted group member / 不具备自动插话资格) → the 0.8.1 dispatch path
+     *   (agent.followup queues it as the next turn: consumed after the current
+     *   turn ends, in arrival order) plus the queue notice at most once per
+     *   running turn.
+     * The running check reads the agent's own lifecycle state — the same
+     * authoritative signal /stop uses; chat.busy (turn/start..turn/end view)
+     * can lag the host driver and is deliberately NOT consulted.
+     */
+    private interceptBusyTurn;
     /** Expand a quoted (reply) message into [引用] text via get_msg. */
     private expandQuote;
     /** Send one message to a chat and return its message id. */
@@ -396,13 +460,32 @@ export declare class ChatBridge {
     private healthDeps;
     /** /healthcheck: render the health summary. */
     private buildHealthReport;
-    /** /healthcheck export: pack the redacted diagnostics archive. */
+    /** /healthcheck export: pack the redacted diagnostics archive. T4 (P3): the
+     * file name carries the trigger reference — the explicit command argument,
+     * or the most recent recorded fault reference when omitted. */
     private exportDiagnosticsPackage;
     private onSessionEvent;
     /** W1: the trace scope for one chat's session events, resolved through the
      * chat-level association table; undefined when tracing is off or the chat
      * has no recorded dispatch (host-initiated turns stay untraced). */
     private traceForChat;
+    /**
+     * T4 (P3): the single fault-reference entry point. Mints one QQ-CONN-/MF-
+     * number, records it in the bounded registry, emits the ok:false trace
+     * event carrying `data.ref` (traceId = the chat's mapped id, or a fresh id
+     * for chat-less connection faults), and writes the structured error log
+     * line — every surface of the fault shares this one number. Called only on
+     * fault events: normal traffic mints nothing (zero overhead).
+     */
+    private mintFailureRef;
+    /** T4: connection-fault reference entry (wired from index.ts via
+     * `connection.onFailure`); the returned reference is appended to the
+     * transport's own log line. */
+    registerConnectionFailure(stage: string, detail: string): string;
+    /** T4: message-fault reference entry for command-plane failures (e.g. the
+     * /retry dispatch throw); the caller appends the returned reference to the
+     * user-visible ⚠️ notice. */
+    registerMessageFailure(chatId: ChatId, stage: TraceStage, detail: string): string;
     private onSessionFlush;
     /** Same-name delegations to the chat registry (D1-PR3): the command table's
      * ctx, the interim/turn event links and the outbound pipeline keep calling

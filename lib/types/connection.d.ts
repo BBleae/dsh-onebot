@@ -77,6 +77,15 @@ export declare class OneBotConnection {
     onMeta: (event: OneBotEvent) => void;
     /** Connection-state callback. */
     onStatus: (connected: boolean) => void;
+    /**
+     * W3/T4 (P3): fault-reference hook, called at the significant connection
+     * failure points (forward reconnect give-up, reverse bind failure, reverse
+     * server error) — the bridge implements it by minting/recording/tracing a
+     * `QQ-CONN-…` reference; the returned reference is appended to the log
+     * line so host logs and the trace file share the same number. Absent
+     * (default) = the fault log lines keep their 0.8.1 wording unchanged.
+     */
+    onFailure: ((stage: string, detail: string) => string | undefined) | undefined;
     private server;
     private socket;
     private lastPongAt;

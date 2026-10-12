@@ -1,3 +1,4 @@
+import type { FailureRefRecord } from './ref.js';
 /** How many recent ok:false events the report lists. */
 export declare const HEALTH_RECENT_FAILURES = 5;
 export interface HealthDeps {
@@ -53,6 +54,12 @@ export interface HealthDeps {
     secrets?: readonly string[];
     /** How many recent ok:false events to include (default HEALTH_RECENT_FAILURES). */
     recentFailures?: number;
+    /** W3/T4 (P3): the recent fault references (resolved live by the bridge);
+     * absent = the report omits the reference section. */
+    failureRefs?: () => FailureRefRecord[];
+    /** W3/T4 (P3): the reference stamped into the exported archive file name
+     * (explicit /healthcheck export argument, or the latest recorded fault). */
+    triggerRef?: string;
     log(level: 'info' | 'warn', message: string): void;
 }
 /** Redact a config snapshot: secret-looking keys become 已配置/未配置, nested
@@ -70,6 +77,9 @@ interface TraceLine {
     stage: string;
     ok: boolean;
     reason?: string;
+    data?: {
+        ref?: unknown;
+    };
 }
 /** The most recent ok:false trace events (file order, newest last). */
 export declare function recentFailures(file: string, count: number): Promise<TraceLine[]>;

@@ -39,6 +39,7 @@ export declare const TRACE_STAGES: {
     readonly notice: "通知";
     readonly inject: "事件注入";
     readonly replay: "离线回放";
+    readonly connection: "连接故障（W3/T4 参考号）";
 };
 export type TraceStage = keyof typeof TRACE_STAGES;
 /** Central Chinese reason table (pipeline-hooks.md §6: maintained in one
@@ -57,6 +58,8 @@ export declare const TRACE_REASONS: {
     readonly inboundRateLimited: "消息频率超限，已丢弃";
     readonly inboundRateNoticeFailed: "限流提示发送失败";
     readonly inboundEmptyContent: "消息展开后无有效文本内容，已丢弃";
+    readonly busyTurnQueued: "任务运行中，新消息已入队等待当前回合结束";
+    readonly busyTurnSteered: "任务运行中，新消息已作为补充指令插话";
     readonly mediaResolveFailed: "媒体解析失败，占位符保留原文";
     readonly nasFileTooLarge: "QQ 文件超过大小上限，已跳过获取";
     readonly nasFileFailed: "QQ 文件获取失败：无可用来源";
@@ -70,6 +73,13 @@ export declare const TRACE_REASONS: {
     readonly outboundCardTooLarge: "文字图卡片超过大小上限，已降级为文本";
     readonly outboundEmptyText: "正文为空，未发送";
     readonly noticeErrorSendFailed: "错误通知发送失败";
+    readonly deferredRegistered: "等待模型回复超时，已登记超时补发跟踪";
+    readonly deferredDelivered: "超时补发：回合完成，最终结果已补发";
+    readonly deferredRetryable: "超时补发：发送明确失败，稍后重试";
+    readonly deferredUncertain: "超时补发：发送结果不确定，保留记录并停止自动重试（防重复）";
+    readonly deferredExhausted: "超时补发：连续 3 次发送失败，停止自动重试";
+    readonly deferredCancelled: "超时补发：跟踪已终止";
+    readonly deferredNoticeFailed: "超时提醒发送失败";
 };
 /** Short, sortable trace id (`t-<base36 seconds>-<n>`); form aligned with the
  * MIT competitor (trace.js:44-47). */

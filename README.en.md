@@ -46,7 +46,7 @@ User(QQ) ←→ NapCat ←→ dsh-onebot plugin ←→ dsh Agent (one per chat)
 | OneBot 11 impl | NapCat / Lagrange / LLOneBot / go-cqhttp (reverse or forward WebSocket) |
 | Optional deps | Voice transcription needs ffmpeg + whisper CLI; t2i text images need Noto CJK fonts on Linux |
 
-Last verified: 2026-09-12 (M4 interaction & persistence: unknown-command interception / serial selection / workspace persistence — 306/306 vitest green, build clean; M0 security semantics unchanged: reverse mode refuses an empty accessToken and defaults to 127.0.0.1, see the BREAKING note under the config table).
+Last verified: 2026-10-12 (0.9.0 release batch W1–W3 five features: v4 command audit / verify health-check script / queue+steer with autoSteerPolicy / deferred delivery on timeout / diagnostic reference IDs — npx tsc --noEmit clean, 532/532 vitest green; M0 security semantics unchanged: reverse mode refuses an empty accessToken and defaults to 127.0.0.1, see the BREAKING note under the config table).
 
 ## Installation
 
