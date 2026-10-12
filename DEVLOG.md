@@ -820,3 +820,11 @@ docker restart 会丢登录态（需重新扫码/QCE 登录）
 - 环境备注：build.sh 的 link-host 前置阶段在当前宿主安装（0.2.1-alpha.2）缺 `@deepseek-ai/dsh-invariants` 包而中止（既有环境状态，dsh-invariants 链接指向旧 appcenter 安装、可用）；故本次按等价编译步骤 `node_modules/.bin/tsc -p tsconfig.json` 直接重建（共享 node_modules 宿主链接已就绪，未再扰动），产物与 build.sh 编译步骤完全一致。
 - 清单同步：package.json version 0.8.1→0.9.0；dsh.plugin.json version 同步 0.9.0；README.md:49 与 README.en.md:49 兼容性「最后验证」行更新为 0.9.0 口径（W1–W3 五特性、tsc+vitest 532 全绿、日期 2026-10-12）；package-lock.json 根 version 沿用既有惯例不动。
 - 部署 runbook（留白待用户执行，本批次未做）：① 发布 npm 包——`npm publish`（发 dsh-onebot-qq@0.9.0；发布前建议人工复核 npm 包内容 `npm pack --dry-run`）；② live 升级——`dsh plugin --profile web add`（官方通道升级插件，不重启宿主；运行中 fiber 不随 CLI add 换代码，0.9.0 行为随宿主下次重启生效，与 0.7.0 惯例一致）；③ 设置页 client bundle 按 mtime/ctime/size 热生效，重开设置页即拉新 bundle。以上两步的执行时机与生产窗口由用户裁决。
+
+## 2026-10-12 发版 0.9.1（/ver ESM `__dirname` 修复，patch 发版）
+
+- **缺陷**：`/ver` 恒显示 `dsh-onebot v?` 且无 commit 后缀。根因：src/commands.ts 的 `packageVersion()`（读 `dirname(__dirname)/package.json`）与 `gitCommit()`（`cwd=dirname(__dirname)`）在编译产物 lib/commands.js 中引用裸 `__dirname`；package.json `"type":"module"` + tsconfig `module: esnext` → ESM 产物下 `__dirname` 未定义 → ReferenceError 被 try/catch 静默吞掉 → 版本与 commit 双双取空 → `/ver` 兜底 `?`。
+- **影响面**：`/ver` 自代码切换 ESM 形态起即受影响，0.9.0 生产 npm 包实证复现（`npm 0.9.0` 形态下恒 `v?`）；仅影响 `/ver` 展示，不影响任何消息收发与会话逻辑。
+- **修复**：两处 `__dirname` 改为 ESM 安全等价 `dirname(dirname(fileURLToPath(import.meta.url)))`（`__dirname` 本身=模块文件目录，其 `dirname` 才是插件根；`node:url` import 新增一行），其余逻辑零改动；`packageVersion()` 加最小 `export` 供回归测试直接断言。
+- **验证**：新增 tests/commands.spec.ts 单测断言 `packageVersion() === '0.9.1'`；`npx tsc --noEmit` 零错误；全量 vitest 全绿（基线 38 文件 / 532 用例 + 新增 1 条）；`grep -c __dirname lib/commands.js` = 0。
+- **清单同步**：package.json version 0.9.0→0.9.1；dsh.plugin.json 同步 0.9.1；lib 产物随本发版提交入库（build.sh 的 link-host 阶段受宿主缺 dsh-invariants 影响时按 0.9.0 先例用 `tsc -p tsconfig.json` 等价重建）；README 无版本硬编码，不动。

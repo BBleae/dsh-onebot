@@ -203,3 +203,4 @@ export declare function sessionPreviewFromEvents(events: readonly SessionPreview
  * first 12 characters) would render every entry of a chat identically — the
  * unique tail must survive for the id to stay recognizable. */
 export declare function shortSessionId(id: string): string;
+export declare function packageVersion(): string | undefined;

@@ -13,6 +13,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { readFile, readdir, realpath, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import type { OneBotConnection } from './connection.js'
 import type { MediaRef } from './cq.js'
@@ -1306,12 +1307,12 @@ async function listPresets(ctx: CommandContext): Promise<string[]> {
   }
 }
 
-/** Plugin version from package.json, read once (per process). */
+/** Plugin version from package.json, read once (per process). Exported for the /ver ESM regression test. */
 let cachedPluginVersion: string | undefined
-function packageVersion(): string | undefined {
+export function packageVersion(): string | undefined {
   if (cachedPluginVersion === undefined) {
     try {
-      const pkg = JSON.parse(readFileSync(join(dirname(__dirname), 'package.json'), 'utf8')) as { version?: string }
+      const pkg = JSON.parse(readFileSync(join(dirname(dirname(fileURLToPath(import.meta.url))), 'package.json'), 'utf8')) as { version?: string }
       cachedPluginVersion = typeof pkg.version === 'string' ? pkg.version : undefined
     } catch {
       cachedPluginVersion = undefined
@@ -1325,7 +1326,7 @@ let cachedGitCommit: string | undefined
 function gitCommit(): string | undefined {
   if (cachedGitCommit === undefined) {
     try {
-      const root = dirname(__dirname)
+      const root = dirname(dirname(fileURLToPath(import.meta.url)))
       const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
       cachedGitCommit = commit !== '' ? commit : undefined
     } catch {

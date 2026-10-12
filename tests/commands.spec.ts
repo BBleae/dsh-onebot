@@ -10,11 +10,15 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { COMMANDS, helpText } from '../src/commands.js'
+import { COMMANDS, helpText, packageVersion } from '../src/commands.js'
 import { MediaStore } from '../src/media.js'
 import { makeCmdHarness } from './helpers/bridge-harness.js'
 
 describe('commands', () => {
+  it('packageVersion resolves 0.9.1 under ESM (no "?")', () => {
+    expect(packageVersion()).toBe('0.9.1')
+  })
+
   it('routes slash commands before the model: /new opens a fresh session', async () => {
     const h = await makeCmdHarness()
     h.sendText('你好')
