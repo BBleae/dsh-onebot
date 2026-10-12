@@ -93,7 +93,7 @@ export function makeFakeAgents(
 }
 
 /** Full bridge + WS harness: inbound via real WebSocket, outbound captured. */
-export async function makeHarness(opts?: { failCreateFor?: string; mediaDir?: string; interimMessages?: boolean; textImageThreshold?: number; maxImageBytes?: number; resumeOk?: boolean; createDelayMs?: number; transcriber?: Transcriber; trace?: TraceSink; ignoreSelf?: boolean; recorder?: InboundRecorder; inject?: InjectChannel; newMessagePolicy?: 'queue' | 'steer'; deferredTimeoutMs?: number }) {
+export async function makeHarness(opts?: { failCreateFor?: string; mediaDir?: string; interimMessages?: boolean; textImageThreshold?: number; maxImageBytes?: number; resumeOk?: boolean; createDelayMs?: number; transcriber?: Transcriber; trace?: TraceSink; ignoreSelf?: boolean; recorder?: InboundRecorder; inject?: InjectChannel; newMessagePolicy?: 'queue' | 'steer'; deferredTimeoutMs?: number; log?: (level: string, message: string) => void }) {
   const ctx = new Context()
   const sessionIds: string[] = []
   const captured = { followups: [] as Array<{ text: string; sessionId: string }>, steers: [] as Array<{ text: string; sessionId: string }>, channelTools: [] as string[], channelSections: [] as string[] }
@@ -134,7 +134,7 @@ export async function makeHarness(opts?: { failCreateFor?: string; mediaDir?: st
       dmPolicy: 'open', groupPolicy: 'open', allowFrom: [], groupAllowFrom: [],
       adminUsers: ['10001'], allowAllUsers: false, requireMention: true,
     },
-    log: () => undefined,
+    log: (level: string, message: string) => opts?.log?.(level, message),
   })
   connection.onMessage = event => {
     void bridge.handleInbound(event)
@@ -193,6 +193,10 @@ export async function makeCmdHarness(opts?: {
    * open read handles). Absent = the bridge sees no persistence service and
    * the list renders preview-less items. */
   sessionPersistence?: unknown
+  /** T4 (P3): optional trace sink (absent = tracing off). */
+  trace?: TraceSink
+  /** T4 (P3): optional log capture for reference-number assertions. */
+  log?: (level: string, message: string) => void
 }) {
   const ctx = new Context()
   const sessionIds: string[] = []
@@ -245,12 +249,13 @@ export async function makeCmdHarness(opts?: {
       maxVoiceBytes: 15 * 1024 * 1024, maxFileBytes: 20 * 1024 * 1024,
       textImageThreshold: 0, cardFooter: 'dsh', fontFiles: [], fontFamilies: [],
       agentPreset: 'standard', workspacePath: mediaDir,
+      ...(opts?.trace !== undefined ? { trace: opts.trace } : {}),
     },
     policy: {
       dmPolicy: 'open', groupPolicy: 'open', allowFrom: [], groupAllowFrom: [],
       adminUsers: ['10001'], allowAllUsers: opts?.allowAllUsers ?? false, requireMention: true,
     },
-    log: () => undefined,
+    log: (level: string, message: string) => opts?.log?.(level, message),
   })
   if (opts?.ocrResult !== undefined) {
     const real = connection.call.bind(connection)

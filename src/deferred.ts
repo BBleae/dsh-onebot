@@ -27,6 +27,7 @@ import type { TraceStage } from './trace.js'
 import { TRACE_REASONS } from './trace.js'
 import { OneBotActionError, OneBotNotConnectedError } from './connection.js'
 import { describeError } from './errors.js'
+import { failureRefSuffix } from './ref.js'
 
 /** The registry file name inside the media dir (one JSON entry per line). */
 export const DEFERRED_REGISTRY_FILE = 'deferred-delivery.jsonl'
@@ -62,6 +63,9 @@ export interface DeferredEntry {
   state: DeferredEntryState
   /** Terminal-state reason (Chinese; also set on success as 已送达). */
   reason?: string
+  /** T4 (P3): the fault reference of the turn's error ending（bridge 在错误
+   * 回合 mint 的 MF- 参考号；终态补发文本与 trace 事件携带同号）。 */
+  ref?: string
   /** The final text captured after the timeout (last text-only assistant
    * message wins; images/tool calls/cards are never captured). */
   resultText?: string
@@ -137,10 +141,12 @@ function textOnly(message: DeferredAssistantMessage): string {
   }
 }
 
-/** Build the deferred delivery text for a finished turn. */
+/** Build the deferred delivery text for a finished turn. T4 (P3): an error
+ * ending carries the turn's MF- reference so the补发 terminal notice and the
+ * trace/log/healthcheck surfaces share one number. */
 export function buildDeferredText(entry: DeferredEntry, reason: DeferredTurnReason | undefined): string {
   if (reason?.kind === 'error') {
-    return DEFERRED_PREFIX + '任务已结束：运行出错：' + (reason.error?.message ?? '未知错误')
+    return DEFERRED_PREFIX + '任务已结束：运行出错：' + (reason.error?.message ?? '未知错误') + failureRefSuffix(entry.ref)
   }
   const text = (entry.resultText ?? '').trim()
   if (text === '') return DEFERRED_PREFIX + '任务已完成，但没有产生文字结果。'
@@ -167,6 +173,7 @@ function sanitizeEntry(raw: unknown): DeferredEntry | null {
     state: rec.state as DeferredEntryState,
   }
   if (typeof rec.traceId === 'string' && rec.traceId !== '') entry.traceId = rec.traceId
+  if (typeof rec.ref === 'string' && rec.ref !== '') entry.ref = rec.ref
   if (typeof rec.reason === 'string' && rec.reason !== '') entry.reason = rec.reason
   if (typeof rec.resultText === 'string' && rec.resultText !== '') entry.resultText = rec.resultText
   return entry
@@ -230,18 +237,21 @@ export class DeferredDelivery {
   }
 
   /** turn/end: cancel the silent-wait timer; complete a pending entry by
-   * delivering the final text (async, bounded retries). Returns true when
+   * delivering the final text (async, bounded retries). `ref` is the turn's
+   * fault reference（T4：bridge 在错误回合 mint 的 MF- 号——终态补发文本与
+   * trace 携带同号；正常回合为 undefined）. Returns true when
    * the turn was under deferred tracking AND its ending is success-class
    * （bridge 据此抑制常规错误通知——终态通知由补发通道送达，避免同一故障
    * 双消息）。两类例外一律返回 false、错误照常走基线 ⚠️ 通知（不静默吞
    * 掉）：terminal entries（delivered/failed/uncertain/cancelled，只是可
    * 观测快照）；以及 in-flight 让位路径上的错误/取消类收尾——在途补发循环
    * 只持有回合 A 的 text 副本，回合 B 的错误 reason 不会被它送达。 */
-  onTurnEnd(chatId: string, sessionId: string, reason: DeferredTurnReason | undefined): boolean {
+  onTurnEnd(chatId: string, sessionId: string, reason: DeferredTurnReason | undefined, ref?: string): boolean {
     this.clearTimer(sessionId)
     const entry = this.entries.get(sessionId)
     if (entry === undefined) return false
     if (entry.state !== 'pending') return false
+    if (ref !== undefined) entry.ref = ref
     if (this.delivering.has(sessionId)) {
       // 防双发 in-flight 守卫：首发失败后的重试退避窗口内同会话新回合收尾，
       // 让位给在途补发循环——只刷新时间戳（新回合的文字已由
@@ -358,14 +368,14 @@ export class DeferredDelivery {
             entry.reason = '发送结果不确定（' + described + '），已保留记录并停止自动重试，避免重复消息'
             entry.updatedAt = this.now()
             this.ctx.log('warn', '超时补发第 ' + attempt + ' 次发送结果不确定，停止自动重试: chat=' + entry.chatId + ' ' + described)
-            this.ctx.trace?.(entry.chatId, { stage: 'queue', ok: false, reason: TRACE_REASONS.deferredUncertain + ': ' + described, data: { sessionId: entry.sessionId, attempt } })
+            this.ctx.trace?.(entry.chatId, { stage: 'queue', ok: false, reason: TRACE_REASONS.deferredUncertain + ': ' + described, data: { sessionId: entry.sessionId, attempt, ...(entry.ref !== undefined ? { ref: entry.ref } : {}) } })
             void this.save()
             return
           }
           if (attempt < DEFERRED_MAX_SEND_ATTEMPTS) {
             const backoff = DEFERRED_RETRY_BACKOFF_MS[attempt - 1] ?? DEFERRED_RETRY_BACKOFF_MS[DEFERRED_RETRY_BACKOFF_MS.length - 1] ?? 10_000
             this.ctx.log('debug', '超时补发第 ' + attempt + ' 次发送明确失败，' + Math.round(backoff / 1000) + 's 后重试: ' + described)
-            this.ctx.trace?.(entry.chatId, { stage: 'queue', ok: false, reason: TRACE_REASONS.deferredRetryable + '（第 ' + attempt + '/' + DEFERRED_MAX_SEND_ATTEMPTS + ' 次）: ' + described, data: { sessionId: entry.sessionId, attempt } })
+            this.ctx.trace?.(entry.chatId, { stage: 'queue', ok: false, reason: TRACE_REASONS.deferredRetryable + '（第 ' + attempt + '/' + DEFERRED_MAX_SEND_ATTEMPTS + ' 次）: ' + described, data: { sessionId: entry.sessionId, attempt, ...(entry.ref !== undefined ? { ref: entry.ref } : {}) } })
             await this.sleep(backoff)
             continue
           }
@@ -373,7 +383,7 @@ export class DeferredDelivery {
           entry.reason = '发送明确失败，已尝试 ' + DEFERRED_MAX_SEND_ATTEMPTS + ' 次（最后错误: ' + described + '）'
           entry.updatedAt = this.now()
           this.ctx.log('warn', '超时补发连续 ' + DEFERRED_MAX_SEND_ATTEMPTS + ' 次发送失败，停止自动重试: chat=' + entry.chatId + ' ' + described)
-          this.ctx.trace?.(entry.chatId, { stage: 'queue', ok: false, reason: TRACE_REASONS.deferredExhausted + ': ' + described, data: { sessionId: entry.sessionId, attempt } })
+          this.ctx.trace?.(entry.chatId, { stage: 'queue', ok: false, reason: TRACE_REASONS.deferredExhausted + ': ' + described, data: { sessionId: entry.sessionId, attempt, ...(entry.ref !== undefined ? { ref: entry.ref } : {}) } })
           void this.save()
           return
         }

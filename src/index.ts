@@ -543,6 +543,12 @@ export function apply(ctx: Context, config: Config): void {
     log,
   })
 
+  // W3/T4 (P3): connection faults mint QQ-CONN-… references through the
+  // bridge (registry + trace + structured log); the transport appends the
+  // returned reference to its own log line, so host logs and qq-trace.jsonl
+  // share the same number for one fault.
+  connection.onFailure = (stage: string, detail: string): string => bridge.registerConnectionFailure(stage, detail)
+
   // Lifecycle: start the bridge and transport; unwind everything on unload.
   ctx.effect(() => {
     bridge.start()

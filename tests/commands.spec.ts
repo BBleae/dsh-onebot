@@ -681,7 +681,7 @@ describe('commands', () => {
       '/plan [off|内容] 宿主计划模式',
       '▍查询',
       '/status 会话全景',
-      '/healthcheck [export] 运行体检（export 导出脱敏诊断包）',
+      '/healthcheck [export [参考号]] 运行体检（export [参考号] 导出脱敏诊断包，文件名含参考号）',
       '/id 会话标识（session/chat）',
       '/ver 插件版本',
       '▍操作',

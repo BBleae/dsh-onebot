@@ -21,6 +21,8 @@ import type { PendingSelection, SessionSwitchOutcome, SwitchableSession } from '
 import { fileToBase64 } from './media.js'
 import type { AgentDefaultModelLike, AgentPresetsLike, BridgeConfig, BridgeDeps, LlmCatalogPort, SessionPersistenceLike, SessionPreviewEvent, SessionReadHandleLike, WorkspaceRegistryLike } from './bridge.js'
 import { describeError } from './errors.js'
+import { failureRefSuffix, isFailureRef } from './ref.js'
+import type { TraceStage } from './trace.js'
 
 /** Narrow view of a live chat the command handlers may read or mutate —
  * the structural subset of the bridge's internal ChatAgent that the
@@ -106,8 +108,14 @@ export interface CommandContext {
    * no health wiring — the command replies with a hint instead). */
   healthReport?: (() => Promise<string>) | undefined
   /** W1/T5 /healthcheck export: pack the redacted diagnostics archive,
-   * returning its path. */
-  exportDiagnostics?: (() => Promise<string>) | undefined
+   * returning its path. T4 (P3): the optional trigger reference is stamped
+   * into the archive file name (absent = the bridge's latest fault reference,
+   * or a reference-free name when none was recorded). */
+  exportDiagnostics?: ((triggerRef?: string) => Promise<string>) | undefined
+  /** T4 (P3): command-plane failure reference entry (/retry dispatch throw).
+   * Mints an MF- reference through the bridge (registry + trace + structured
+   * log) and returns it for the ⚠️ notice tail. */
+  reportFailure?: ((chatId: ChatId, stage: TraceStage, detail: string) => string) | undefined
   /** The only config fields the commands read. */
   config: Pick<BridgeConfig, 'interimMessages' | 'maxImageBytes' | 'unknownCommand'>
 }
@@ -155,7 +163,7 @@ export const COMMANDS: CommandDefinition[] = [
   { name: 'preset', adminOnly: true, group: '会话', help: '[id|序号] 查看/切换 agent 预设', handler: (ctx, chatId, arg) => handlePresetCommand(ctx, chatId, arg) },
   { name: 'session', adminOnly: true, group: '会话', help: '[序号] 查看/切回历史会话', handler: (ctx, chatId, arg) => handleSessionCommand(ctx, chatId, arg) },
   { name: 'status', adminOnly: true, group: '查询', help: '会话全景', handler: (ctx, chatId) => handleStatusCommand(ctx, chatId) },
-  { name: 'healthcheck', adminOnly: true, group: '查询', help: '[export] 运行体检（export 导出脱敏诊断包）', handler: (ctx, chatId, arg) => handleHealthcheckCommand(ctx, chatId, arg) },
+  { name: 'healthcheck', adminOnly: true, group: '查询', help: '[export [参考号]] 运行体检（export [参考号] 导出脱敏诊断包，文件名含参考号）', handler: (ctx, chatId, arg) => handleHealthcheckCommand(ctx, chatId, arg) },
   { name: 'retry', adminOnly: true, group: '操作', help: '重跑上一条', handler: (ctx, chatId) => handleRetryCommand(ctx, chatId) },
   { name: 'id', adminOnly: true, group: '查询', help: '会话标识（session/chat）', handler: (ctx, chatId) => handleIdCommand(ctx, chatId) },
   { name: 'ver', adminOnly: true, group: '查询', help: '插件版本', handler: (ctx, chatId) => handleVerCommand(ctx, chatId) },
@@ -641,22 +649,31 @@ async function handleStatusCommand(ctx: CommandContext, chatId: ChatId): Promise
  * diagnostics archive with the `export` argument. Failures are reported to
  * the chat as a ⚠️ line, never thrown past the router. */
 async function handleHealthcheckCommand(ctx: CommandContext, chatId: ChatId, arg: string): Promise<void> {
-  const sub = arg.trim().toLowerCase()
-  if (sub === 'export') {
+  const trimmed = arg.trim()
+  // T4 (P3): `export [参考号]` — an explicit reference is validated against
+  // the reference format before it reaches the archive file name (fail-closed:
+  // junk input gets the usage line, never a sanitized-weird file name).
+  const exportMatch = /^export(\s+(\S+))?$/.exec(trimmed)
+  if (exportMatch !== null) {
+    const triggerRef = exportMatch[2]
+    if (triggerRef !== undefined && !isFailureRef(triggerRef)) {
+      await ctx.sendToChat(chatId, '⚠️ 参考号格式不正确：' + triggerRef + '\n用法：/healthcheck（体检摘要）或 /healthcheck export [参考号]（导出脱敏诊断包；参考号形如 MF-xxx / QQ-CONN-xxx，省略时自动使用最近一次故障的参考号）。')
+      return
+    }
     if (ctx.exportDiagnostics === undefined) {
       await ctx.sendToChat(chatId, '⚠️ 诊断包导出未启用（health 模块未接线）。')
       return
     }
     try {
-      const archive = await ctx.exportDiagnostics()
+      const archive = await ctx.exportDiagnostics(triggerRef)
       await ctx.sendToChat(chatId, '📦 诊断包已导出（token/accessToken 已强制脱敏）：\n' + archive)
     } catch (error) {
       await ctx.sendToChat(chatId, '⚠️ 诊断包导出失败：' + describeError(error))
     }
     return
   }
-  if (sub !== '') {
-    await ctx.sendToChat(chatId, '用法：/healthcheck（体检摘要）或 /healthcheck export（导出脱敏诊断包）。')
+  if (trimmed !== '') {
+    await ctx.sendToChat(chatId, '用法：/healthcheck（体检摘要）或 /healthcheck export [参考号]（导出脱敏诊断包）。')
     return
   }
   if (ctx.healthReport === undefined) {
@@ -716,7 +733,15 @@ async function handleRetryCommand(ctx: CommandContext, chatId: ChatId): Promise<
   ctx.log('info', 'retry for ' + chatId)
   // /retry is admin-gated in tryHandleCommand, so the retried turn's role is
   // the admin who issued the command (M1-A2).
-  await ctx.dispatchFollowup(chatId, text, 'admin', chat.lastNickname)
+  try {
+    await ctx.dispatchFollowup(chatId, text, 'admin', chat.lastNickname)
+  } catch (error) {
+    // T4 (P3): a failed retry is a message fault — mint an MF- reference
+    // (trace + structured log via the bridge) and surface it in the ⚠️ notice
+    // instead of letting the throw escape the router silently.
+    const ref = ctx.reportFailure?.(chatId, 'command', '/retry 重试失败: ' + describeError(error))
+    await ctx.sendToChat(chatId, '⚠️ 重试失败：' + describeError(error) + failureRefSuffix(ref))
+  }
 }
 
 /** /ocr: OCR the most recent inbound image via NapCat's ocr_image. */

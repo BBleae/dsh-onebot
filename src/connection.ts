@@ -135,6 +135,15 @@ export class OneBotConnection {
   onMeta: (event: OneBotEvent) => void = () => undefined
   /** Connection-state callback. */
   onStatus: (connected: boolean) => void = () => undefined
+  /**
+   * W3/T4 (P3): fault-reference hook, called at the significant connection
+   * failure points (forward reconnect give-up, reverse bind failure, reverse
+   * server error) — the bridge implements it by minting/recording/tracing a
+   * `QQ-CONN-…` reference; the returned reference is appended to the log
+   * line so host logs and the trace file share the same number. Absent
+   * (default) = the fault log lines keep their 0.8.1 wording unchanged.
+   */
+  onFailure: ((stage: string, detail: string) => string | undefined) | undefined = undefined
 
   private server: WebSocketServer | undefined
   private socket: WebSocket | undefined
@@ -312,7 +321,10 @@ export class OneBotConnection {
         this.scheduleReverseRetry(server, error)
         return
       }
-      this.log('error', 'reverse WS server error: ' + describeError(error) + errorStack(error))
+      // W3/T4: a non-EADDRINUSE server error is a significant bridge fault —
+      // mint a QQ-CONN reference (bridge hook) and share it with the log line.
+      const ref = this.onFailure?.('reverse-server-error', '反向 WS 服务器错误: ' + describeError(error))
+      this.log('error', 'reverse WS server error: ' + describeError(error) + (ref !== undefined ? '（参考号 ' + ref + '）' : '') + errorStack(error))
     })
     server.on('connection', (socket, request) => {
       const expected = Buffer.from('Bearer ' + this.config.accessToken, 'utf8')
@@ -391,9 +403,12 @@ export class OneBotConnection {
       // already handled above
     }
     // 2) Log with dedup: attempts 2..REVERSE_LOG_EVERY-1 stay at debug level.
+    //    W3/T4: the reference is minted only when a line is actually logged
+    //    (steady-state dedup — bind retries must not spam references).
     this.reverseRetryAttempts += 1
     if (this.reverseRetryAttempts === 1 || this.reverseRetryAttempts % REVERSE_LOG_EVERY === 0) {
-      this.log('error', 'reverse WS server cannot listen on ' + this.config.host + ':' + this.config.port + ': port already in use (EADDRINUSE); stop the process occupying this port, or change config.port; retrying every ' + REVERSE_RETRY_MS / 1000 + 's until the port is released (attempt ' + this.reverseRetryAttempts + ')' + errorStack(error))
+      const ref = this.onFailure?.('reverse-bind-failed', '反向 WS 服务器无法监听 ' + this.config.host + ':' + this.config.port + '：端口被占用（EADDRINUSE）')
+      this.log('error', 'reverse WS server cannot listen on ' + this.config.host + ':' + this.config.port + ': port already in use (EADDRINUSE); stop the process occupying this port, or change config.port; retrying every ' + REVERSE_RETRY_MS / 1000 + 's until the port is released (attempt ' + this.reverseRetryAttempts + ')' + (ref !== undefined ? '（参考号 ' + ref + '）' : '') + errorStack(error))
     } else {
       this.log('debug', 'reverse WS server bind retry ' + this.reverseRetryAttempts + ': port ' + this.config.port + ' still in use')
     }
@@ -461,7 +476,11 @@ export class OneBotConnection {
     // delay at its last value).
     const max = this.config.reconnectMaxAttempts ?? MAX_RECONNECT_ATTEMPTS
     if (max > 0 && this.reconnectAttempts > max) {
-      this.log('error', 'giving up forward WS reconnect after ' + max + ' retries (reconnectMaxAttempts=' + max + '); check the NapCat ws address and network, then restart the plugin or reload the dsh-onebot channel to reconnect; slow self-heal retries continue every ' + SELF_HEAL_INTERVAL_MS / 1000 + 's (capped at ' + SELF_HEAL_HOURLY_CAP + '/hour) until the peer comes back')
+      // W3/T4: the give-up is the ladder's terminal fault point — one
+      // QQ-CONN reference for the whole outage (individual ladder retries
+      // stay reference-free to avoid fault storms).
+      const ref = this.onFailure?.('forward-reconnect-give-up', 'forward 重连 ' + max + ' 次后放弃（reconnectMaxAttempts=' + max + '），转入慢速自愈')
+      this.log('error', 'giving up forward WS reconnect after ' + max + ' retries (reconnectMaxAttempts=' + max + '); check the NapCat ws address and network, then restart the plugin or reload the dsh-onebot channel to reconnect; slow self-heal retries continue every ' + SELF_HEAL_INTERVAL_MS / 1000 + 's (capped at ' + SELF_HEAL_HOURLY_CAP + '/hour) until the peer comes back' + (ref !== undefined ? '（参考号 ' + ref + '）' : ''))
       this.scheduleSelfHeal()
       return
     }

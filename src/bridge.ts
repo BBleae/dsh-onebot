@@ -45,6 +45,9 @@ import type { InjectChannel } from './inject.js'
 import type { InboundRecorder } from './record.js'
 import { healthReport, exportDiagnostics, redactSnapshot } from './health.js'
 import type { HealthDeps } from './health.js'
+import { FailureRefRegistry, failureRefSuffix } from './ref.js'
+import type { FailureRefKind } from './ref.js'
+import type { TraceStage } from './trace.js'
 /** T2 (P1): the queue notice sent to a chat when a message arrives while its
  * task is running under the default 'queue' policy — at most ONE per running
  * turn (the flag resets at turn/end) so a burst of queued messages never
@@ -269,6 +272,10 @@ export class ChatBridge {
   /** T3 (P2): the deferred-delivery tracker (超时补发) — timeout timers, the
    * JSONL registry, bounded send retries and restart recovery. */
   private readonly deferred: DeferredDelivery
+  /** T4 (P3): the bounded registry of recent fault references — every minted
+   * QQ-CONN-/MF- number is recorded here for the /healthcheck report and the
+   * diagnostics archive file name. */
+  private readonly failureRefs = new FailureRefRegistry()
   /** Live registry indexes — the inbound/outbound/interim/turn links keep
    * reading them through these same-name views. */
   private get chats(): Map<ChatId, ChatAgent> { return this.registry.chats }
@@ -749,7 +756,11 @@ export class ChatBridge {
       dshHome: bridge.deps.dshHome,
       // W1/T5: the healthcheck command renders/packs through the bridge.
       healthReport: () => bridge.buildHealthReport(),
-      exportDiagnostics: () => bridge.exportDiagnosticsPackage(),
+      // T4 (P3): export takes an optional trigger reference (file-name stamp).
+      exportDiagnostics: triggerRef => bridge.exportDiagnosticsPackage(triggerRef),
+      // T4 (P3): command-plane failures (/retry) mint an MF- reference through
+      // the bridge's single entry point (registry + trace + structured log).
+      reportFailure: (chatId, stage, detail) => bridge.registerMessageFailure(chatId, stage, detail),
       config: { interimMessages: bridge.deps.config.interimMessages, maxImageBytes: bridge.deps.config.maxImageBytes, unknownCommand: bridge.deps.config.unknownCommand },
     }
   }
@@ -943,6 +954,8 @@ export class ChatBridge {
           }
         : {}),
       configSnapshot: this.deps.configSnapshot?.() ?? {},
+      // T4 (P3): the recent fault references for the report section.
+      failureRefs: () => this.failureRefs.recent(),
       log: (level, message) => this.deps.log(level, message),
     }
   }
@@ -952,9 +965,12 @@ export class ChatBridge {
     return healthReport(this.healthDeps())
   }
 
-  /** /healthcheck export: pack the redacted diagnostics archive. */
-  private async exportDiagnosticsPackage(): Promise<string> {
-    return exportDiagnostics(this.healthDeps())
+  /** /healthcheck export: pack the redacted diagnostics archive. T4 (P3): the
+   * file name carries the trigger reference — the explicit command argument,
+   * or the most recent recorded fault reference when omitted. */
+  private async exportDiagnosticsPackage(triggerRef?: string): Promise<string> {
+    const deps = this.healthDeps()
+    return exportDiagnostics({ ...deps, triggerRef: triggerRef ?? this.failureRefs.recent(1)[0]?.ref })
   }
 
   // ------------------------------------------------------------ session events
@@ -996,18 +1012,27 @@ export class ChatBridge {
       return
     }
     if (event.type === 'turn/end') {
+      const reason = event.data.reason
+      // T4 (P3): a message-turn fault mints ONE MF- reference before any
+      // consumer runs — the trace event (data.ref), the structured log line,
+      // the ⚠️ notice tail and the deferred terminal text all carry the same
+      // number. Normal (completed/cancelled) turns mint nothing.
+      const errorRef = reason.kind === 'error'
+        ? this.mintFailureRef('msg', 'agent', '模型回合出错: ' + reason.error.message, { chatId })
+        : undefined
       // T3 (P2): complete a deferred entry（补发异步进行）；true = the turn was
       // under deferred tracking — the terminal-state notice rides the补发
       // path, so the normal error notice below is suppressed（同一故障不双发）.
-      const deferredTracked = this.deferred.onTurnEnd(chatId, session.id, event.data.reason)
+      const deferredTracked = this.deferred.onTurnEnd(chatId, session.id, reason, errorRef)
       this.interim.onTurnEnd(chatId, chat)
-      if (event.data.reason.kind === 'error') {
-        trace?.emit('agent', { ok: false, reason: '模型回合出错: ' + event.data.reason.error.message })
+      if (reason.kind === 'error') {
+        // T4: the ok:false agent event is emitted by mintFailureRef (with
+        // data.ref) — no second event for the same decision point.
       } else {
-        trace?.emit('agent', { ok: true, reason: '模型回合结束（' + event.data.reason.kind + '）' })
+        trace?.emit('agent', { ok: true, reason: '模型回合结束（' + reason.kind + '）' })
       }
-      if (event.data.reason.kind === 'error') {
-        const message = event.data.reason.error.message
+      if (reason.kind === 'error') {
+        const message = reason.error.message
         // 基线语义保持：碰撞自愈原本挂在 sendErrorNotice 分支内；deferred
         // 回合的终态走补发通道，也必须自愈，故闸为 sendErrorNotice || deferredTracked。
         if ((this.deps.config.sendErrorNotice || deferredTracked)
@@ -1015,7 +1040,7 @@ export class ChatBridge {
           void this.healSessionCollision(chatId)
         }
         if (!deferredTracked && this.deps.config.sendErrorNotice) {
-          this.sendToChat(chatId, '⚠️ 运行出错：' + message, { queuable: true }).catch((error: unknown) => {
+          this.sendToChat(chatId, '⚠️ 运行出错：' + message + failureRefSuffix(errorRef), { queuable: true }).catch((error: unknown) => {
             // pipeline-hooks.md #21: the send failure used to be swallowed.
             this.deps.log('debug', '错误通知发送失败: ' + describeError(error))
             trace?.emit('notice', { ok: false, reason: TRACE_REASONS.noticeErrorSendFailed })
@@ -1046,6 +1071,49 @@ export class ChatBridge {
     if (sink === undefined || !sink.enabled) return undefined
     const traceId = this.traceByChat.get(chatId)
     return traceId !== undefined ? sink.scope(traceId, chatId) : undefined
+  }
+
+  // ------------------------------------------------------ failure references (W3/T4)
+
+  /**
+   * T4 (P3): the single fault-reference entry point. Mints one QQ-CONN-/MF-
+   * number, records it in the bounded registry, emits the ok:false trace
+   * event carrying `data.ref` (traceId = the chat's mapped id, or a fresh id
+   * for chat-less connection faults), and writes the structured error log
+   * line — every surface of the fault shares this one number. Called only on
+   * fault events: normal traffic mints nothing (zero overhead).
+   */
+  private mintFailureRef(kind: FailureRefKind, stage: TraceStage, detail: string, opts: { chatId?: ChatId } = {}): string {
+    const ref = this.failureRefs.mint(kind)
+    const traceId = opts.chatId !== undefined ? this.traceByChat.get(opts.chatId) : undefined
+    this.failureRefs.record({ ref, kind, ts: Date.now(), stage, detail, traceId })
+    const sink = this.deps.config.trace
+    if (sink !== undefined && sink.enabled) {
+      sink.emit({
+        traceId: traceId ?? newTraceId(sink.now()),
+        chatId: opts.chatId,
+        stage,
+        ok: false,
+        reason: detail,
+        data: { ref, refKind: kind },
+      })
+    }
+    this.deps.log('error', '故障参考号 ' + ref + ' [' + stage + ']: ' + detail)
+    return ref
+  }
+
+  /** T4: connection-fault reference entry (wired from index.ts via
+   * `connection.onFailure`); the returned reference is appended to the
+   * transport's own log line. */
+  registerConnectionFailure(stage: string, detail: string): string {
+    return this.mintFailureRef('conn', 'connection', detail)
+  }
+
+  /** T4: message-fault reference entry for command-plane failures (e.g. the
+   * /retry dispatch throw); the caller appends the returned reference to the
+   * user-visible ⚠️ notice. */
+  registerMessageFailure(chatId: ChatId, stage: TraceStage, detail: string): string {
+    return this.mintFailureRef('msg', stage, detail, { chatId })
   }
 
   private async onSessionFlush(session: Session): Promise<void> {

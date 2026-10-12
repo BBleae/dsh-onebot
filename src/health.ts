@@ -29,6 +29,7 @@ import { join } from 'node:path'
 import { ACTION_AUDIT_FILE } from './outbound.js'
 import { INBOX_FILE, inboxRotatedFile } from './record.js'
 import { TRACE_FILE, traceRotatedFile } from './trace.js'
+import type { FailureRefRecord } from './ref.js'
 
 /** How many recent ok:false events the report lists. */
 export const HEALTH_RECENT_FAILURES = 5
@@ -57,6 +58,12 @@ export interface HealthDeps {
   secrets?: readonly string[]
   /** How many recent ok:false events to include (default HEALTH_RECENT_FAILURES). */
   recentFailures?: number
+  /** W3/T4 (P3): the recent fault references (resolved live by the bridge);
+   * absent = the report omits the reference section. */
+  failureRefs?: () => FailureRefRecord[]
+  /** W3/T4 (P3): the reference stamped into the exported archive file name
+   * (explicit /healthcheck export argument, or the latest recorded fault). */
+  triggerRef?: string
   log(level: 'info' | 'warn', message: string): void
 }
 
@@ -131,8 +138,22 @@ export async function healthReport(deps: HealthDeps): Promise<string> {
   } else {
     lines.push('最近 ok:false 事件（' + recent.length + ' 条）：')
     for (const event of recent) {
-      lines.push('  ' + new Date(event.ts).toISOString() + ' [' + event.stage + '] ' + (event.reason ?? '') + ' (' + event.traceId + ')')
+      const ref = traceEventRef(event)
+      lines.push('  ' + new Date(event.ts).toISOString() + ' [' + event.stage + '] ' + (event.reason ?? '') + ' (' + event.traceId + ')' + (ref !== undefined ? '（参考号 ' + ref + '）' : ''))
     }
+  }
+  // W3/T4 (P3): the recent fault references + the trace-file lookup guidance.
+  const refs = deps.failureRefs?.() ?? []
+  if (refs.length === 0) {
+    lines.push('最近故障参考号：无（参考号仅在故障事件生成，正常流量零发号）')
+  } else {
+    lines.push('最近故障参考号（' + refs.length + ' 条）——在 ' + TRACE_FILE + ' 中 grep 任一参考号即可定位该次故障的全部决策事件：')
+    for (const record of refs) {
+      lines.push('  ' + new Date(record.ts).toISOString() + ' ' + record.ref + ' [' + record.stage + ']' + (record.traceId !== undefined ? ' trace=' + record.traceId : '') + ' ' + record.detail)
+    }
+  }
+  if (deps.triggerRef !== undefined && deps.triggerRef !== '') {
+    lines.push('本次导出参考号：' + deps.triggerRef)
   }
   return lines.join('\n')
 }
@@ -160,6 +181,13 @@ interface TraceLine {
   stage: string
   ok: boolean
   reason?: string
+  data?: { ref?: unknown }
+}
+
+/** The fault reference carried by a trace event's data (W3/T4), when present
+ * and well-formed; undefined otherwise (old events and non-fault events). */
+function traceEventRef(event: TraceLine): string | undefined {
+  return typeof event.data?.ref === 'string' && event.data.ref !== '' ? event.data.ref : undefined
 }
 
 /** The most recent ok:false trace events (file order, newest last). */
@@ -209,7 +237,12 @@ export async function exportDiagnostics(deps: HealthDeps): Promise<string> {
     }
   }
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)
-  const archive = join(deps.mediaDir, 'qq-diagnostics-' + stamp + '.zip')
+  // W3/T4 (P3): the file name carries the trigger reference (sanitized — the
+  // command layer validates the format, this layer strips defensively) so the
+  // archive is bound to the fault being investigated. No reference = the
+  // 0.8.1-compatible name.
+  const refStamp = (deps.triggerRef ?? '').replace(/[^A-Za-z0-9-]/g, '')
+  const archive = join(deps.mediaDir, 'qq-diagnostics-' + stamp + (refStamp !== '' ? '-' + refStamp : '') + '.zip')
   await writeFile(archive, zip)
   return archive
 }
