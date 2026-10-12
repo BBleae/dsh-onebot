@@ -106,6 +106,14 @@ export const TRACE_REASONS = {
   outboundCardTooLarge: '文字图卡片超过大小上限，已降级为文本',
   outboundEmptyText: '正文为空，未发送',
   noticeErrorSendFailed: '错误通知发送失败',
+  // T3 (P2) 超时补发（deferred delivery）。
+  deferredRegistered: '等待模型回复超时，已登记超时补发跟踪',
+  deferredDelivered: '超时补发：回合完成，最终结果已补发',
+  deferredRetryable: '超时补发：发送明确失败，稍后重试',
+  deferredUncertain: '超时补发：发送结果不确定，保留记录并停止自动重试（防重复）',
+  deferredExhausted: '超时补发：连续 3 次发送失败，停止自动重试',
+  deferredCancelled: '超时补发：跟踪已终止',
+  deferredNoticeFailed: '超时提醒发送失败',
 } as const
 
 let traceCounter = 0

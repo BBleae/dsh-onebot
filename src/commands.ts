@@ -54,6 +54,9 @@ export interface CommandContext {
   /** Registry capabilities the commands legitimately trigger. */
   resetChat(chatId: ChatId): Promise<void>
   dispatchFollowup(chatId: ChatId, text: string, role: UserRole, nickname?: string): Promise<void>
+  /** T3 (P2): /stop — 显式终止该聊天的超时补发跟踪（pending 条目转
+   * cancelled，其他聊天不受影响）。无补发条目时为 no-op。 */
+  stopDeferredTracking(chatId: ChatId): void
   /** T2 (P1): /steer — the bridge-owned steer core (agent.steer with the
    * producer-owned source kind; the createUserMessage write point stays in
    * bridge.ts). Returns false when the chat has no live agent. */
@@ -284,6 +287,10 @@ async function handleStopCommand(ctx: CommandContext, chatId: ChatId): Promise<v
   } else {
     await ctx.sendToChat(chatId, '当前没有正在进行的生成。')
   }
+  // T3 (P2): 无论是否有运行中生成，都显式终止该聊天的超时补发跟踪——
+  // /stop 的语义边界是「只终止当前聊天提交的回合」，补发跟踪随行终止；
+  // 其他聊天的条目不受影响。
+  ctx.stopDeferredTracking(chatId)
 }
 
 /** T2 (P1): the /steer submit notice — one line per accepted instruction.

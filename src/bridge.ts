@@ -35,6 +35,8 @@ import type { ChatAgent } from './registry.js'
 import { InboundPipeline, normalizeOneBot11 } from './inbound.js'
 import type { NormalizedInbound } from './inbound.js'
 import { InterimTracker } from './interim.js'
+import { DeferredDelivery } from './deferred.js'
+import { DEFAULT_DEFERRED_TIMEOUT_MS } from './deferred.js'
 import { describeError, errorStack } from './errors.js'
 import { currentTrace, newTraceId, runWithTrace, TRACE_REASONS } from './trace.js'
 import type { TraceSink, TraceScope } from './trace.js'
@@ -103,6 +105,11 @@ export interface BridgeConfig {
    * 非受限发送者均可。不改变 /steer 命令（始终仅管理员）与 queue 模式行为，
    * 也不放宽受限用户软限制（受限消息任何档都排队）。 */
   autoSteerPolicy?: 'admin' | 'all'
+  /** T3 (P2)：等待模型回复超时阈值（ms）——回合超过该时长没有任何模型输出
+   * 时提示超时并登记补发跟踪（deferred delivery），回合完成后向原聊天补发
+   * 最终文字（「（超时补发）」前缀，走既有 outbound 管线）；absent →
+   * 600000（保守 10 分钟），0 = 关闭超时补发。 */
+  deferredTimeoutMs?: number
 }
 
 /** W1 trace/config extensions: the observability knobs ride as optional
@@ -259,6 +266,9 @@ export class ChatBridge {
   /** Interim domain (D1-PR5): the assistant/message interim routing, the
    * per-message recall timers and the turn/end settlement. */
   private readonly interim: InterimTracker
+  /** T3 (P2): the deferred-delivery tracker (超时补发) — timeout timers, the
+   * JSONL registry, bounded send retries and restart recovery. */
+  private readonly deferred: DeferredDelivery
   /** Live registry indexes — the inbound/outbound/interim/turn links keep
    * reading them through these same-name views. */
   private get chats(): Map<ChatId, ChatAgent> { return this.registry.chats }
@@ -356,6 +366,28 @@ export class ChatBridge {
       log: (level, message) => this.deps.log(level, message),
       config: deps.config,
     })
+    this.deferred = new DeferredDelivery({
+      sendToChat: (chatId, text, options) => this.sendToChat(chatId, text, options),
+      isTurnRunning: chatId => this.chats.get(chatId)?.agent.status === 'running',
+      takePendingText: chatId => {
+        const chat = this.chats.get(chatId)
+        if (chat === undefined || chat.loopPending === null) return null
+        const text = chat.loopPending
+        chat.loopPending = null
+        return text
+      },
+      traceIdFor: chatId => this.traceByChat.get(chatId),
+      log: (level, message) => this.deps.log(level, message),
+      trace: (chatId, event) => {
+        const sink = deps.config.trace
+        if (sink === undefined || !sink.enabled) return
+        const mapped = this.traceByChat.get(chatId)
+        sink.emit({ traceId: mapped ?? newTraceId(sink.now()), chatId, ...event })
+      },
+      mediaDir: deps.config.mediaDir,
+      timeoutMs: deps.config.deferredTimeoutMs ?? DEFAULT_DEFERRED_TIMEOUT_MS,
+      isStopping: () => this.stopping,
+    })
   }
 
   /** Start listening: wire connection handlers and the session event feed. */
@@ -376,6 +408,9 @@ export class ChatBridge {
       await this.registry.loadRetired()
       await this.registry.loadSwitchable()
       await this.registry.loadMapping()
+      // T3 (P2): restore deferred-delivery tracking（未完结条目在该会话的
+      // 下一次 turn/end 兑现；损坏行降级跳过）。
+      await this.deferred.loadPersisted()
     }).then(() => {
       if (this.stopping) return
       this.deps.log('info', 'bridge ready (' + this.registry.chats.size + ' resumed chat(s))')
@@ -394,6 +429,9 @@ export class ChatBridge {
       this.sessionFlushOff = undefined
     }
     await this.registry.stop()
+    // T3 (P2): disarm the deferred silent-wait timers（pending 条目已落盘，
+    // 重启后 loadPersisted 恢复跟踪续投）。
+    this.deferred.stopAll()
   }
 
   /** Map an agent session id back to its chat (for model tools). */
@@ -659,6 +697,8 @@ export class ChatBridge {
       hasChat: chatId => bridge.chats.has(chatId),
       resetChat: chatId => bridge.resetChat(chatId),
       dispatchFollowup: (chatId, text, role, nickname) => bridge.dispatchFollowup(chatId, text, role, nickname),
+      // T3 (P2): /stop 也显式终止该聊天的超时补发跟踪（其他聊天不受影响）。
+      stopDeferredTracking: chatId => bridge.deferred.cancelChat(chatId),
       // T2 (P1): /steer — the bridge-owned steer core keeps the createUserMessage
       // source write point in bridge.ts (producer-owned kind, session-v4 guard).
       steerRunningTurn: (chatId, text) => bridge.steerMessage(chatId, text),
@@ -942,28 +982,44 @@ export class ChatBridge {
       chat.activeTurnRole = chat.pendingTurnRoles.shift() ?? 'member'
       chat.lastActivityAt = Date.now()
       chat.busy = true
+      // T3 (P2): arm the deferred silent-wait window for this turn（每次模型
+      // 输出重置；turn/end 解除；deferredTimeoutMs<=0 时为 no-op）。
+      this.deferred.onTurnStart(chatId, session.id)
       return
     }
     if (event.type === 'assistant/message') {
+      // T3 (P2): a deferred-registered (timed-out) turn is muted — its text
+      // messages are captured for the final补发 only（不插播 interim、不转
+      // 审批/提问卡：超时后只补最终文字与终态通知）。
+      if (this.deferred.onAssistantMessage(chatId, session.id, event.data.message)) return
       this.interim.onAssistantMessage(chatId, chat, event.data.message)
       return
     }
     if (event.type === 'turn/end') {
+      // T3 (P2): complete a deferred entry（补发异步进行）；true = the turn was
+      // under deferred tracking — the terminal-state notice rides the补发
+      // path, so the normal error notice below is suppressed（同一故障不双发）.
+      const deferredTracked = this.deferred.onTurnEnd(chatId, session.id, event.data.reason)
       this.interim.onTurnEnd(chatId, chat)
       if (event.data.reason.kind === 'error') {
         trace?.emit('agent', { ok: false, reason: '模型回合出错: ' + event.data.reason.error.message })
       } else {
         trace?.emit('agent', { ok: true, reason: '模型回合结束（' + event.data.reason.kind + '）' })
       }
-      if (event.data.reason.kind === 'error' && this.deps.config.sendErrorNotice) {
+      if (event.data.reason.kind === 'error') {
         const message = event.data.reason.error.message
-        this.sendToChat(chatId, '⚠️ 运行出错：' + message, { queuable: true }).catch((error: unknown) => {
-          // pipeline-hooks.md #21: the send failure used to be swallowed.
-          this.deps.log('debug', '错误通知发送失败: ' + describeError(error))
-          trace?.emit('notice', { ok: false, reason: TRACE_REASONS.noticeErrorSendFailed })
-        })
-        if (/persisted log on disk that does not match this live session|id collision/i.test(message)) {
+        // 基线语义保持：碰撞自愈原本挂在 sendErrorNotice 分支内；deferred
+        // 回合的终态走补发通道，也必须自愈，故闸为 sendErrorNotice || deferredTracked。
+        if ((this.deps.config.sendErrorNotice || deferredTracked)
+          && /persisted log on disk that does not match this live session|id collision/i.test(message)) {
           void this.healSessionCollision(chatId)
+        }
+        if (!deferredTracked && this.deps.config.sendErrorNotice) {
+          this.sendToChat(chatId, '⚠️ 运行出错：' + message, { queuable: true }).catch((error: unknown) => {
+            // pipeline-hooks.md #21: the send failure used to be swallowed.
+            this.deps.log('debug', '错误通知发送失败: ' + describeError(error))
+            trace?.emit('notice', { ok: false, reason: TRACE_REASONS.noticeErrorSendFailed })
+          })
         }
       }
       this.stopTyping(chat)

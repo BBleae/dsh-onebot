@@ -93,7 +93,7 @@ export function makeFakeAgents(
 }
 
 /** Full bridge + WS harness: inbound via real WebSocket, outbound captured. */
-export async function makeHarness(opts?: { failCreateFor?: string; mediaDir?: string; interimMessages?: boolean; textImageThreshold?: number; maxImageBytes?: number; resumeOk?: boolean; createDelayMs?: number; transcriber?: Transcriber; trace?: TraceSink; ignoreSelf?: boolean; recorder?: InboundRecorder; inject?: InjectChannel; newMessagePolicy?: 'queue' | 'steer' }) {
+export async function makeHarness(opts?: { failCreateFor?: string; mediaDir?: string; interimMessages?: boolean; textImageThreshold?: number; maxImageBytes?: number; resumeOk?: boolean; createDelayMs?: number; transcriber?: Transcriber; trace?: TraceSink; ignoreSelf?: boolean; recorder?: InboundRecorder; inject?: InjectChannel; newMessagePolicy?: 'queue' | 'steer'; deferredTimeoutMs?: number }) {
   const ctx = new Context()
   const sessionIds: string[] = []
   const captured = { followups: [] as Array<{ text: string; sessionId: string }>, steers: [] as Array<{ text: string; sessionId: string }>, channelTools: [] as string[], channelSections: [] as string[] }
@@ -122,6 +122,8 @@ export async function makeHarness(opts?: { failCreateFor?: string; mediaDir?: st
       agentPreset: 'standard', workspacePath: mediaDir,
       // T2 (P1): busy-turn policy override (absent = the 'queue' default).
       ...(opts?.newMessagePolicy !== undefined ? { newMessagePolicy: opts.newMessagePolicy } : {}),
+      // T3 (P2): deferred-delivery timeout override (absent = the 10min default).
+      ...(opts?.deferredTimeoutMs !== undefined ? { deferredTimeoutMs: opts.deferredTimeoutMs } : {}),
       // W1: optional decision-trace sink (absent = tracing off).
       trace: opts?.trace,
       // W1/T5: optional recorder / inject channel (absent = feature off).
@@ -179,6 +181,10 @@ export async function makeCmdHarness(opts?: {
   newMessagePolicy?: 'queue' | 'steer'
   /** T9-B: auto-steer eligibility knob; absent = the bridge default 'admin'. */
   autoSteerPolicy?: 'admin' | 'all'
+  /** T3 (P2): deferred-delivery timeout override (absent = the 10min default). */
+  deferredTimeoutMs?: number
+  /** T3 (P2): media dir override（重启恢复测试复用同一目录的注册表/映射文件）。 */
+  mediaDir?: string
   commands?: unknown
   allowAllUsers?: boolean
   agentDefaultModel?: unknown
@@ -196,7 +202,7 @@ export async function makeCmdHarness(opts?: {
   const captured = { followups: [] as Array<{ text: string; sessionId: string }>, steers: [] as Array<{ text: string; sessionId: string }>, createdMeta: capturedMeta }
   const agents = makeFakeAgents(sessionIds, captured)
   const sessions = { flush: vi.fn(async () => undefined) }
-  const mediaDir = mkdtempSync(join(tmpdir(), 'onebot-test-'))
+  const mediaDir = opts?.mediaDir ?? mkdtempSync(join(tmpdir(), 'onebot-test-'))
   const connection = new OneBotConnection({
     mode: 'reverse', host: '127.0.0.1', port: 0, url: 'ws://127.0.0.1:3001', accessToken: 'test-token', callTimeoutMs: 3_000,
   })
@@ -233,6 +239,8 @@ export async function makeCmdHarness(opts?: {
       ...(opts?.restrictedMemberPrefix !== undefined ? { restrictedMemberPrefix: opts.restrictedMemberPrefix } : {}),
       ...(opts?.newMessagePolicy !== undefined ? { newMessagePolicy: opts.newMessagePolicy } : {}),
       ...(opts?.autoSteerPolicy !== undefined ? { autoSteerPolicy: opts.autoSteerPolicy } : {}),
+      // T3 (P2): deferred-delivery timeout override (absent = the 10min default).
+      ...(opts?.deferredTimeoutMs !== undefined ? { deferredTimeoutMs: opts.deferredTimeoutMs } : {}),
       sensitivePatterns: [], mediaDir, maxImageBytes: 8 * 1024 * 1024,
       maxVoiceBytes: 15 * 1024 * 1024, maxFileBytes: 20 * 1024 * 1024,
       textImageThreshold: 0, cardFooter: 'dsh', fontFiles: [], fontFamilies: [],
