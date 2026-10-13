@@ -127,6 +127,9 @@ export interface CommandSender {
 export interface CommandDefinition {
     /** Command word after the leading slash (matched case-insensitively). */
     name: string;
+    /** Alternative first-words routed to the same handler; rendered nowhere
+     * (/help lists only `name`, suggestions map an alias back to it). */
+    aliases?: string[];
     /** Admin-only flag; every current command is gated at the router entry. */
     adminOnly: boolean;
     /** /help line shown after "/name ": the usage-argument form (when the

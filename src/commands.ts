@@ -137,6 +137,9 @@ export interface CommandSender {
 export interface CommandDefinition {
   /** Command word after the leading slash (matched case-insensitively). */
   name: string
+  /** Alternative first-words routed to the same handler; rendered nowhere
+   * (/help lists only `name`, suggestions map an alias back to it). */
+  aliases?: string[]
   /** Admin-only flag; every current command is gated at the router entry. */
   adminOnly: boolean
   /** /help line shown after "/name ": the usage-argument form (when the
@@ -164,7 +167,7 @@ export const COMMANDS: CommandDefinition[] = [
   { name: 'preset', adminOnly: true, group: '会话', help: '[id|序号] 查看/切换 agent 预设', handler: (ctx, chatId, arg) => handlePresetCommand(ctx, chatId, arg) },
   { name: 'session', adminOnly: true, group: '会话', help: '[序号] 查看/切回历史会话', handler: (ctx, chatId, arg) => handleSessionCommand(ctx, chatId, arg) },
   { name: 'status', adminOnly: true, group: '查询', help: '会话全景', handler: (ctx, chatId) => handleStatusCommand(ctx, chatId) },
-  { name: 'healthcheck', adminOnly: true, group: '查询', help: '[export [参考号]] 运行体检（export [参考号] 导出脱敏诊断包，文件名含参考号）', handler: (ctx, chatId, arg) => handleHealthcheckCommand(ctx, chatId, arg) },
+  { name: 'doctor', aliases: ['healthcheck'], adminOnly: true, group: '查询', help: '[export [参考号]] 运行体检（export [参考号] 导出脱敏诊断包，文件名含参考号）', handler: (ctx, chatId, arg) => handleHealthcheckCommand(ctx, chatId, arg) },
   { name: 'retry', adminOnly: true, group: '操作', help: '重跑上一条', handler: (ctx, chatId) => handleRetryCommand(ctx, chatId) },
   { name: 'id', adminOnly: true, group: '查询', help: '会话标识（session/chat）', handler: (ctx, chatId) => handleIdCommand(ctx, chatId) },
   { name: 'ver', adminOnly: true, group: '查询', help: '插件版本', handler: (ctx, chatId) => handleVerCommand(ctx, chatId) },
@@ -211,12 +214,18 @@ export function helpText(): string {
 /** Close command-name suggestions for an unknown /word: prefix matches first
  * (table order), then an edit-distance ≤2 fallback that only runs for inputs
  * of length ≥4 (so short real commands like /id or /ver are never shadowed);
- * at most 3 candidates are listed. */
+ * an alias candidate suggests its primary name. At most 3 candidates are
+ * listed. */
 function suggestCommands(input: string): string[] {
-  const names = COMMANDS.map(c => c.name)
-  const suggestions = names.filter(n => n.startsWith(input))
+  const canonical = new Map<string, string>()
+  for (const c of COMMANDS) {
+    canonical.set(c.name, c.name)
+    for (const a of c.aliases ?? []) canonical.set(a, c.name)
+  }
+  const names = [...canonical.keys()]
+  const suggestions = names.filter(n => n.startsWith(input)).map(n => canonical.get(n)!)
   if (suggestions.length === 0 && input.length >= 4) {
-    suggestions.push(...names.filter(n => Math.abs(n.length - input.length) <= 2 && editDistanceWithin2(input, n)))
+    suggestions.push(...names.filter(n => Math.abs(n.length - input.length) <= 2 && editDistanceWithin2(input, n)).map(n => canonical.get(n)!))
   }
   return suggestions.slice(0, 3)
 }
@@ -264,7 +273,7 @@ export async function tryHandleCommand(ctx: CommandContext, chatId: ChatId, text
 
   const name = first.slice(1).toLowerCase()
   ctx.log('debug', 'slash /' + name + ' for ' + chatId)
-  const command = COMMANDS.find(c => c.name === name)
+  const command = COMMANDS.find(c => c.name === name || c.aliases?.includes(name))
   if (command === undefined) {
     const suggestions = suggestCommands(name)
     if (suggestions.length > 0) {
@@ -658,7 +667,7 @@ async function handleHealthcheckCommand(ctx: CommandContext, chatId: ChatId, arg
   if (exportMatch !== null) {
     const triggerRef = exportMatch[2]
     if (triggerRef !== undefined && !isFailureRef(triggerRef)) {
-      await ctx.sendToChat(chatId, '⚠️ 参考号格式不正确：' + triggerRef + '\n用法：/healthcheck（体检摘要）或 /healthcheck export [参考号]（导出脱敏诊断包；参考号形如 MF-xxx / QQ-CONN-xxx，省略时自动使用最近一次故障的参考号）。')
+      await ctx.sendToChat(chatId, '⚠️ 参考号格式不正确：' + triggerRef + '\n用法：/doctor（体检摘要）或 /doctor export [参考号]（导出脱敏诊断包；参考号形如 MF-xxx / QQ-CONN-xxx，省略时自动使用最近一次故障的参考号）。')
       return
     }
     if (ctx.exportDiagnostics === undefined) {
@@ -674,7 +683,7 @@ async function handleHealthcheckCommand(ctx: CommandContext, chatId: ChatId, arg
     return
   }
   if (trimmed !== '') {
-    await ctx.sendToChat(chatId, '用法：/healthcheck（体检摘要）或 /healthcheck export [参考号]（导出脱敏诊断包）。')
+    await ctx.sendToChat(chatId, '用法：/doctor（体检摘要）或 /doctor export [参考号]（导出脱敏诊断包）。')
     return
   }
   if (ctx.healthReport === undefined) {

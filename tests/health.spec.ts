@@ -156,7 +156,7 @@ describe('/healthcheck command', () => {
     }, { timeout: 15_000 })
     h.sendText('/healthcheck what')
     await vi.waitFor(() => {
-      expect(h.outbound.some(f => JSON.stringify(f.params).includes('用法：/healthcheck'))).toBe(true)
+      expect(h.outbound.some(f => JSON.stringify(f.params).includes('用法：/doctor'))).toBe(true)
     }, { timeout: 15_000 })
     h.client.close()
     await h.bridge.stop()

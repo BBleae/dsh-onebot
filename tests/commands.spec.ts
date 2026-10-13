@@ -15,8 +15,8 @@ import { MediaStore } from '../src/media.js'
 import { makeCmdHarness } from './helpers/bridge-harness.js'
 
 describe('commands', () => {
-  it('packageVersion resolves 0.9.1 under ESM (no "?")', () => {
-    expect(packageVersion()).toBe('0.9.1')
+  it('packageVersion resolves 0.9.2 under ESM (no "?")', () => {
+    expect(packageVersion()).toBe('0.9.2')
   })
 
   it('routes slash commands before the model: /new opens a fresh session', async () => {
@@ -659,7 +659,7 @@ describe('commands', () => {
     // Row order = the /help line order inside each group; the router matches
     // by name so ordering is routing-neutral. Adding a command is exactly one
     // row here (group + usage-style help) — /help picks it up for free.
-    expect(COMMANDS.map(c => c.name)).toEqual(['new', 'stop', 'steer', 'model', 'workspace', 'preset', 'session', 'status', 'healthcheck', 'retry', 'id', 'ver', 'ocr', 'mode', 'plan', 'permission', 'goal', 'help'])
+    expect(COMMANDS.map(c => c.name)).toEqual(['new', 'stop', 'steer', 'model', 'workspace', 'preset', 'session', 'status', 'doctor', 'retry', 'id', 'ver', 'ocr', 'mode', 'plan', 'permission', 'goal', 'help'])
     expect(COMMANDS).toHaveLength(18)
     expect(new Set(COMMANDS.map(c => c.name)).size).toBe(18)
     for (const c of COMMANDS) {
@@ -685,7 +685,7 @@ describe('commands', () => {
       '/plan [off|内容] 宿主计划模式',
       '▍查询',
       '/status 会话全景',
-      '/healthcheck [export [参考号]] 运行体检（export [参考号] 导出脱敏诊断包，文件名含参考号）',
+      '/doctor [export [参考号]] 运行体检（export [参考号] 导出脱敏诊断包，文件名含参考号）',
       '/id 会话标识（session/chat）',
       '/ver 插件版本',
       '▍操作',
@@ -703,7 +703,26 @@ describe('commands', () => {
     for (const c of COMMANDS) {
       expect(card.split('\n').filter(l => l.startsWith('/' + c.name + ' '))).toHaveLength(1)
     }
+    // The alias never appears in /help (only the primary name is listed).
+    expect(card).not.toContain('/healthcheck')
   })
+
+  it('/healthcheck is an equivalent alias of /doctor: same handler, same output (T1 rename)', async () => {
+    const h = await makeCmdHarness()
+    h.sendText('/doctor')
+    await vi.waitFor(() => {
+      expect(h.outbound.some(f => JSON.stringify(f.params).includes('▍dsh-onebot 体检'))).toBe(true)
+    }, { timeout: 15_000 })
+    h.sendText('/healthcheck')
+    await vi.waitFor(() => {
+      expect(h.outbound.filter(f => JSON.stringify(f.params).includes('▍dsh-onebot 体检'))).toHaveLength(2)
+    }, { timeout: 15_000 })
+    // The alias was routed (two identical health summaries), not intercepted.
+    expect(JSON.stringify(h.outbound)).not.toContain('未知命令')
+    h.client.close()
+    await h.bridge.stop()
+    await h.connection.stop()
+  }, 30_000)
 
   it('command errors carry a how-to-fix usage/next-step line (usability audit)', async () => {
     const resolve = vi.fn(async (id?: string) => {
@@ -758,11 +777,11 @@ describe('commands', () => {
 
   it('unknown command with a close match suggests candidates and is consumed (R1)', async () => {
     const h = await makeCmdHarness()
-    // Prefix match: /he is a prefix of /help (and of /healthcheck — table
-    // order puts the newer row first).
+    // Prefix match: /he is a prefix of /help (and of the /healthcheck alias of
+    // /doctor — the alias suggests the primary name).
     h.sendText('/he')
     await vi.waitFor(() => {
-      expect(h.outbound.some(f => JSON.stringify(f.params).includes('未知命令 /he，你是想用 /healthcheck（/help）吗？'))).toBe(true)
+      expect(h.outbound.some(f => JSON.stringify(f.params).includes('未知命令 /he，你是想用 /doctor（/help）吗？'))).toBe(true)
     })
     // Prefix match with several candidates, table order, max shown as /model（/mode）.
     h.sendText('/mo')
@@ -773,6 +792,12 @@ describe('commands', () => {
     h.sendText('/vers')
     await vi.waitFor(() => {
       expect(h.outbound.some(f => JSON.stringify(f.params).includes('你是想用 /ver吗？'))).toBe(true)
+    })
+    // Misspelling /helthcheck (distance 1 from the /healthcheck alias) still
+    // suggests — mapped to the primary name /doctor.
+    h.sendText('/helthcheck')
+    await vi.waitFor(() => {
+      expect(h.outbound.some(f => JSON.stringify(f.params).includes('未知命令 /helthcheck，你是想用 /doctor吗？'))).toBe(true)
     })
     // All three were consumed: none reached the model.
     expect(h.captured.followups).toHaveLength(0)

@@ -828,3 +828,13 @@ docker restart 会丢登录态（需重新扫码/QCE 登录）
 - **修复**：两处 `__dirname` 改为 ESM 安全等价 `dirname(dirname(fileURLToPath(import.meta.url)))`（`__dirname` 本身=模块文件目录，其 `dirname` 才是插件根；`node:url` import 新增一行），其余逻辑零改动；`packageVersion()` 加最小 `export` 供回归测试直接断言。
 - **验证**：新增 tests/commands.spec.ts 单测断言 `packageVersion() === '0.9.1'`；`npx tsc --noEmit` 零错误；全量 vitest 全绿（基线 38 文件 / 532 用例 + 新增 1 条）；`grep -c __dirname lib/commands.js` = 0。
 - **清单同步**：package.json version 0.9.0→0.9.1；dsh.plugin.json 同步 0.9.1；lib 产物随本发版提交入库（build.sh 的 link-host 阶段受宿主缺 dsh-invariants 影响时按 0.9.0 先例用 `tsc -p tsconfig.json` 等价重建）；README 无版本硬编码，不动。
+
+## 2026-10-12 发版 0.9.2（/healthcheck 更名 /doctor，保留等价别名，T1）
+
+- **更名**：命令表主条目 `name: 'healthcheck'` → `name: 'doctor'`（`CommandDefinition` 新增可选 `aliases` 字段，本条目 `aliases: ['healthcheck']`）；路由 `find` 兼容 `c.aliases?.includes(name)`——`/doctor` 与 `/healthcheck` 走同一 handler `handleHealthcheckCommand`，行为逐字一致（无参摘要 / `export [参考号]` / 非法参考号提示均不变，`export` 子参数用法不变）。实现/内部标识符零改动：`handleHealthcheckCommand`、src/health.ts 文件名、trace stage 值等均保持原名（最小改动）。
+- **用户可见文案**：src/commands.ts 两处用法提示（非法参考号分支 + 未知子参数分支）中 `/healthcheck` → `/doctor`；src/health.ts 报告内文不含命令名（报告标题「▍dsh-onebot 体检」无命令引用），不动。
+- **`/help` 只列 `/doctor`**：helpText 按 `name` 渲染，别名不重复出现；相近命令建议（suggestCommands）把别名候选归一到主名——`/he` 现提示「你是想用 /doctor（/help）吗？」，拼错 `/helthcheck`（编辑距离 1 命中别名）提示 `/doctor`，不再落 unknownCommand 拦截。
+- **测试**：commands.spec.ts 命令表断言与 /help 全文快照随更名更新；新增别名等价用例（`/doctor` 与 `/healthcheck` 各渲染一份「▍dsh-onebot 体检」摘要、别名被路由而非拦截、别名不出现在 /help 卡片）；health.spec.ts 用法提示断言随文案改 `/doctor`（该用例经 `/healthcheck` 发送，兼作别名回归覆盖）；health-ref.spec.ts 零改动（经别名发送，自然覆盖）。
+- **文档**：README.md 与 README.en.md 命令表/斜杠命令总览/能力表/命令参考表/参考号排查节中 `/healthcheck` → `/doctor`，双语首次出现处注明「(别名 /healthcheck)」；其余文档不动。
+- **清单同步**：package.json version 0.9.1→0.9.2；dsh.plugin.json 同步 0.9.2；tests/commands.spec.ts packageVersion 断言随版更新为 0.9.2；lib 产物按 0.9.0/0.9.1 先例以 `tsc -p tsconfig.json` 等价重建入库（tsconfig `include: ["src"]`，lib/client.js 手工真相源零改动）；package-lock.json 沿用既有惯例不动。
+- **边界**：只改工作区仓库，运行中生产（0.9.0）与 npm 均未触碰；不 push、不 publish。
