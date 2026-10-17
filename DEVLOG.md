@@ -838,3 +838,11 @@ docker restart 会丢登录态（需重新扫码/QCE 登录）
 - **文档**：README.md 与 README.en.md 命令表/斜杠命令总览/能力表/命令参考表/参考号排查节中 `/healthcheck` → `/doctor`，双语首次出现处注明「(别名 /healthcheck)」；其余文档不动。
 - **清单同步**：package.json version 0.9.1→0.9.2；dsh.plugin.json 同步 0.9.2；tests/commands.spec.ts packageVersion 断言随版更新为 0.9.2；lib 产物按 0.9.0/0.9.1 先例以 `tsc -p tsconfig.json` 等价重建入库（tsconfig `include: ["src"]`，lib/client.js 手工真相源零改动）；package-lock.json 沿用既有惯例不动。
 - **边界**：只改工作区仓库，运行中生产（0.9.0）与 npm 均未触碰；不 push、不 publish。
+
+## 2026-10-17 发版 0.9.3（engines.dsh 覆盖 DSH 0.2.1 系列，T1）
+
+- **缺陷**：DSH 0.2.1-rc.1 宿主校验插件 engines 不通过。根因：node-semver 预发布 tuple 规则——`>=0.2.0-rc.1 <0.3.0-0` 的预发布比较子只挂载在 `0.2.0` tuple 上，`0.2.1-rc.1` 属 `0.2.1` tuple，按规则不命中（实测 `satisfies('0.2.1-rc.1', 旧范围)` = false）。
+- **修复**：package.json 与 dsh.plugin.json 的 engines.dsh 逐字追加 ` || >=0.2.1-0 <0.3.0-0`（`>=0.2.1-0` 比较子挂载 `0.2.1` tuple 且带预发布标记，为 0.2.1.x 预发布版本放行；上界仍 `<0.3.0-0` 不变）；两文件范围逐字一致。
+- **验证**：node v24 + semver：`satisfies('0.2.1-rc.1', 新范围)` = true（旧范围 false）；边界保持 `0.2.0`/`0.2.0-rc.1` = true、`0.3.0`/`0.3.0-rc.1` = false；全量 vitest 全绿（基线 38 文件 / 534 用例；tests/deferred.spec.ts:127 为既有并行负载 flake，隔离复跑 3/3 绿，与本改动无关——详见 dsh-onebot-093-release-report.md）。
+- **清单同步**：package.json version 0.9.2→0.9.3；dsh.plugin.json 同步 0.9.3；tests/commands.spec.ts packageVersion 断言随版更新为 0.9.3（it 描述串 + expect 两行，仿 0.9.2 发版先例）；lib 产物零改动（本发版不改 src，`/ver` 的 packageVersion() 动态读 package.json）；package-lock.json 沿用既有惯例不动。
+- **边界**：随本发版同批完成 commit→push→npm publish→profile web 手工升级（t14 模式 pnpm install，备份回滚点先行）；宿主进程未重启，0.9.3 行为随宿主下次重启生效。
