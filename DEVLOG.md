@@ -846,3 +846,10 @@ docker restart 会丢登录态（需重新扫码/QCE 登录）
 - **验证**：node v24 + semver：`satisfies('0.2.1-rc.1', 新范围)` = true（旧范围 false）；边界保持 `0.2.0`/`0.2.0-rc.1` = true、`0.3.0`/`0.3.0-rc.1` = false；全量 vitest 全绿（基线 38 文件 / 534 用例；tests/deferred.spec.ts:127 为既有并行负载 flake，隔离复跑 3/3 绿，与本改动无关——详见 dsh-onebot-093-release-report.md）。
 - **清单同步**：package.json version 0.9.2→0.9.3；dsh.plugin.json 同步 0.9.3；tests/commands.spec.ts packageVersion 断言随版更新为 0.9.3（it 描述串 + expect 两行，仿 0.9.2 发版先例）；lib 产物零改动（本发版不改 src，`/ver` 的 packageVersion() 动态读 package.json）；package-lock.json 沿用既有惯例不动。
 - **边界**：随本发版同批完成 commit→push→npm publish→profile web 手工升级（t14 模式 pnpm install，备份回滚点先行）；宿主进程未重启，0.9.3 行为随宿主下次重启生效。
+
+## 2026-10-24 发版 0.9.4（设置页入口迁至「插件」选项卡，T4）
+
+- **改动**：client 设置页入口 settings.section → plugins.bundle.config（组合包详情页渲染 OnebotSettingsPanel），并清理 settings.nav 死键（settings.section 挂载时代的导航 locale 键）。实现见 feat commit 029b5a1（lib/client.js + docs/settings-page-design.md，已随 029b5a1 入库），本发版不含 lib 改动。
+- **验证**：全量 vitest 全绿（38 文件 / 534 用例）；首轮 tests/inject.spec.ts「dry-run=false lets injected rounds really send」并行负载下偶发失败（既有环境 flake，0.9.0 已记录口径），隔离单跑 11/11 绿后全量复跑 38 文件 / 534 用例全过。
+- **清单同步**：package.json version 0.9.3→0.9.4；dsh.plugin.json 同步 0.9.4；tests/commands.spec.ts packageVersion 断言随版更新为 0.9.4（it 描述串 + expect 两行，仿 0.9.3 发版先例）；lib 产物零改动（本发版不改 src，`/ver` 的 packageVersion() 动态读 package.json，client.js 本次未再改）；package-lock.json 沿用既有惯例不动。
+- **边界**：commit → tag v0.9.4 → push → npm publish 随本发版同批完成。
