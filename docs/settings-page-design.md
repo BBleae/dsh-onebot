@@ -238,7 +238,7 @@ OnebotSettingsSnapshot {
 - 客户端侧（T4）照抄 dsh-expert-orchestrator/lib/client.js 模式：CJS 包裹
   `window.__ModuleLoader__.load({id, factory:(require)=>{…}})`（:47）、
   `ctx.remote.$mount(TYPERT_REMOTE)`（:1789）后取 `remote.onebotSettings`、
-  `ctx.slots.inject('settings.section', …)`（:1793-1795）、externals 仅 react。
+  `ctx.slots.inject('plugins.bundle.config', …)`（:1793-1795）、externals 仅 react。
 
 ---
 
