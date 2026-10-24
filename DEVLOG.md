@@ -869,3 +869,11 @@ docker restart 会丢登录态（需重新扫码/QCE 登录）
 - **验证**：`link-host.sh` 对 rc.3 exit 0（20 链接全指向 rc.3、`find node_modules -xtype l` 悬空 0）；`verify-injected-context.mjs` 对 rc.3 与 rc.2 均 7/7 PASS（S1–S6 + 清理，日志见 dsh-onebot-rc3-adapt-test-evidence/w5-*-fixed.log）；`verify-lan-management.mjs` 对 rc.3 12/12 PASS（回归）；`npx tsc -p tsconfig.json --noEmit` 0 错误；全量 vitest 549/550——唯一失败项是 tests/inject.spec.ts 既有并行负载 flake（15s waitFor 超时，隔离 26/26 绿，与 0.9.3/0.9.4 条目同口径），本次改动只碰 scripts/ 且不被任何测试引用。
 - **未发版原因**：`scripts/` 不在 package.json `files` 白名单内，npm 发布物不含这两个脚本，故不 bump 版本。
 
+## 2026-10-24 发版 0.9.6（工具脚本修复与 rc.3 适配验证收口，T5）
+
+- **改动**：本次发版为「发布面收口」，**无运行时代码变更**（src/ 零改动、lib/ 零改动）。随本发版出版本号的是已入库的工具脚本修复 commit `ac5c80a`（link-host.sh 清单修正：移出宿主不存在的 `dsh-invariants`、补齐 6 个 `dsh-session-format*` 依赖、schemastery/cosmokit 顶层优先兜底；verify-injected-context.mjs:87 改为整模块命名空间传入）与 DSH 0.2.1-rc.3 适配验证结论 **= 兼容**（link-host exit 0；verify-injected-context 对 rc.3 与 rc.2 均 7/7 PASS；verify-lan-management 对 rc.3 12/12 PASS）。
+- **说明（发布物边界）**：`scripts/` 不在 package.json `files` 白名单（仅 `lib` + `cordis.patch.yml`），这两个脚本修复**不随 npm 包分发**；版本号 bump 仅作为该修复与其 rc.3 适配验证的收口标记，安装用户运行行为与 0.9.5 完全一致。
+- **验证**：`npx tsc -p tsconfig.json --noEmit` 0 错误；全量 vitest 38 文件 / 550 用例全绿（一次通过，本轮无 flake）；lib 产物 sha256 与发版前逐字节一致（零改动）。
+- **清单同步**：package.json version 0.9.5→0.9.6；dsh.plugin.json 同步 0.9.6；tests/commands.spec.ts packageVersion 断言随版更新为 0.9.6（it 描述串 + expect 两行，仿 0.9.3/0.9.4/0.9.5 发版先例）；package-lock.json 沿用既有惯例不动。
+- **发布面收口**：commit → push origin main（同批带上此前未推送的 `ac5c80a`）→ tag `v0.9.6` → GitHub Release → npm publish → npmmirror 同步 → profile web 升级 0.9.6；同批**补建历史缺失的 v0.9.4 / v0.9.5 GitHub Release**（只建 Release，不新建、不覆盖既有 tag）。宿主进程未重启，0.9.6 随宿主下次重启生效。
+
