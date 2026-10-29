@@ -49,3 +49,22 @@ describe('findCommand (A8 PATH scan, no shell)', () => {
     await expect(findCommand('fake-whisper')).resolves.toBe(program)
   })
 })
+
+describe('findCommand on Windows (PATHEXT)', () => {
+  it.runIf(process.platform === 'win32')('finds ffmpeg.exe when asked for ffmpeg', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'stt-find-win-'))
+    const program = join(dir, 'ffmpeg.exe')
+    await writeFile(program, '')
+    vi.stubEnv('PATH', dir)
+    vi.stubEnv('PATHEXT', '.COM;.EXE;.BAT;.CMD')
+    // PATHEXT decides the case of the extension; Windows paths are case-insensitive
+    expect((await findCommand('ffmpeg'))?.toLowerCase()).toBe(program.toLowerCase())
+  })
+
+  it.runIf(process.platform === 'win32')('still prefers an exact name match', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'stt-find-win-exact-'))
+    await writeFile(join(dir, 'whisper-cli.exe'), '')
+    vi.stubEnv('PATH', dir)
+    await expect(findCommand('whisper-cli.exe')).resolves.toBe(join(dir, 'whisper-cli.exe'))
+  })
+})

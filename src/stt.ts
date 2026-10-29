@@ -74,13 +74,18 @@ function runProcess(
  * builtins/aliases stop being visible — callers only need real binaries).
  */
 export async function findCommand(name: string): Promise<string | undefined> {
-  for (const dir of (process.env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':')) {
-    const candidate = join(dir, name)
-    try {
-      await access(candidate, constants.X_OK)
-      return candidate
-    } catch {
-      // missing or not executable — try the next dir
+  const win = process.platform === 'win32'
+  // Windows binaries carry an extension (ffmpeg.exe): try PATHEXT after the bare name.
+  const exts = win ? ['', ...(process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(ext => ext !== '')] : ['']
+  for (const dir of (process.env.PATH ?? '').split(win ? ';' : ':')) {
+    for (const ext of exts) {
+      const candidate = join(dir, name + ext)
+      try {
+        await access(candidate, constants.X_OK)
+        return candidate
+      } catch {
+        // missing or not executable — try the next candidate
+      }
     }
   }
   return undefined
