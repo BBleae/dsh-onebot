@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cqUnescape, parseMessage, detectMention, parseCqString, faceToEmoji } from '../src/cq.js'
+import { cqUnescape, parseMessage, detectMention, mentionKind, replyMentionsBot, parseCqString, faceToEmoji } from '../src/cq.js'
 
 describe('cqUnescape', () => {
   it('reverses CQ attribute escaping', () => {
@@ -103,5 +103,38 @@ describe('faceToEmoji', () => {
   it('maps known and unknown ids', () => {
     expect(faceToEmoji('0')).toBe('😀')
     expect(faceToEmoji('999999')).toBe('😀')
+  })
+})
+
+describe('mentionKind / replyMentionsBot (reply without qq)', () => {
+  it('tells an undeterminable reply apart from @bot and a reply naming the bot', () => {
+    expect(mentionKind([{ type: 'reply', data: { id: '1' } }], '', '10001', '')).toBe('reply?')
+    expect(mentionKind([{ type: 'reply', data: { id: '1', qq: '10001' } }], '', '10001', '')).toBe('reply')
+    expect(mentionKind([{ type: 'reply', data: { id: '1', qq: '999' } }], '', '10001', '')).toBe('none')
+    expect(mentionKind([{ type: 'reply', data: { id: '1' } }, { type: 'at', data: { qq: '10001' } }], '', '10001', '')).toBe('at')
+    expect(mentionKind([{ type: 'reply', data: { id: '1' } }, { type: 'at', data: { qq: '999' } }], '', '10001', '')).toBe('reply?')
+    expect(mentionKind(undefined, '[CQ:reply,id=5]hi', '10001', '')).toBe('reply?')
+    expect(mentionKind(undefined, '[CQ:at,qq=10001]hi', '10001', '')).toBe('at')
+    expect(mentionKind(undefined, 'plain', '10001', '')).toBe('none')
+  })
+
+  it('detectMention keeps its boolean contract', () => {
+    expect(detectMention([{ type: 'reply', data: { id: '1' } }], '', '10001', '')).toBe(true)
+    expect(detectMention([{ type: 'reply', data: { id: '1', qq: '999' } }], '', '10001', '')).toBe(false)
+  })
+
+  it('a reply counts only when the quoted message is the bot\'s own', async () => {
+    const senders: Record<string, string> = { 7: '10001', 8: '20002' }
+    const senderOf = async (id: string) => senders[id]
+    expect(await replyMentionsBot('7', '10001', senderOf)).toBe(true)
+    // quoting someone else (A quotes B and @B) must not reach the bot
+    expect(await replyMentionsBot('8', '10001', senderOf)).toBe(false)
+  })
+
+  it('falls back to the old fail-open answer when the sender cannot be learned', async () => {
+    expect(await replyMentionsBot('9', '10001', async () => undefined)).toBe(true)
+    expect(await replyMentionsBot('9', '10001', async () => { throw new Error('get_msg failed') })).toBe(true)
+    expect(await replyMentionsBot(undefined, '10001', async () => '20002')).toBe(true)
+    expect(await replyMentionsBot('8', '', async () => '20002')).toBe(true)
   })
 })

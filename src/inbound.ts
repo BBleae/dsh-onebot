@@ -19,7 +19,7 @@ import { extForInboundName } from './media.js'
 import type { Transcriber } from './stt.js'
 import { transcriptLabel } from './stt.js'
 import type { OneBotSegment, MediaRef } from './cq.js'
-import { cqUnescape, detectMention, parseMessage, segmentText } from './cq.js'
+import { cqUnescape, mentionKind, parseMessage, replyMentionsBot, segmentText } from './cq.js'
 import type { AccessPolicyConfig, ChatId, UserRole } from './chat.js'
 import {
   buildChatId, buildGroupMessagePrefix, classifyUserRole, dmAllowed, groupAllowed,
@@ -251,7 +251,21 @@ export class InboundPipeline {
       }
     }
 
-    const mentioned = detectMention(inbound.segments, inbound.raw, this.ctx.selfId(), this.ctx.config.botQQ)
+    const how = mentionKind(inbound.segments, inbound.raw, this.ctx.selfId(), this.ctx.config.botQQ)
+    let mentioned = how !== 'none'
+    // A reply that doesn't say whose message it quotes: ask get_msg, so that
+    // quoting someone else in the group is not taken as @bot.
+    if (kind === 'group' && this.ctx.config.requireMention && how === 'reply?') {
+      const bot = this.ctx.selfId() !== '' ? this.ctx.selfId() : this.ctx.config.botQQ
+      mentioned = await replyMentionsBot(inbound.replyId, bot, async (messageId) => {
+        const data = await this.ctx.call('get_msg', { message_id: Number(messageId) }) as {
+          sender?: { user_id?: number | string }
+          user_id?: number | string
+        }
+        const uid = data?.sender?.user_id ?? data?.user_id
+        return uid === undefined ? undefined : String(uid)
+      })
+    }
     if (kind === 'group' && this.ctx.config.requireMention && !mentioned) {
       this.ctx.log('debug', 'ignoring unmentioned group message in ' + groupId)
       currentTrace()?.emit('mention', { ok: false, reason: TRACE_REASONS.inboundUnmentioned })

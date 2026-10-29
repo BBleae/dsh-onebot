@@ -115,6 +115,8 @@ const CQ_REPLY_RE = /\[CQ:reply,id=([^,\]]+)\]/g
  * determinably the bot itself (M1-A8); an undeterminable target (segment
  * carries no qq) falls back to the previous always-mention behavior — a
  * deliberate fail-open so tightening the gate never breaks existing setups.
+ * InboundPipeline settles that case for gated group messages by looking the
+ * quoted message up (see mentionKind / replyMentionsBot).
  * @param segments - segment array (may be undefined for CQ-only payloads).
  * @param raw - raw CQ string.
  * @param selfId - learned bot QQ id ('' when unknown).
@@ -126,25 +128,65 @@ export function detectMention(
   selfId: string,
   botQQ: string,
 ): boolean {
+  return mentionKind(segments, raw, selfId, botQQ) !== 'none'
+}
+
+/**
+ * How the message mentions the bot: 'at' (@bot / @all), 'reply' (a reply
+ * whose segment names the bot), 'reply?' (a reply whose target the segment
+ * does not carry — NapCat's reply segment is only `{ id }`), or 'none'.
+ * Same rules as detectMention, which is `mentionKind(...) !== 'none'`.
+ */
+export function mentionKind(
+  segments: OneBotSegment[] | undefined,
+  raw: string,
+  selfId: string,
+  botQQ: string,
+): 'at' | 'reply' | 'reply?' | 'none' {
   const bot = selfId !== '' ? selfId : botQQ
   if (segments !== undefined) {
+    let reply: 'reply?' | 'none' = 'none'
     for (const seg of segments) {
       if (seg.type === 'reply') {
         const qq = seg.data.qq ?? ''
-        if (qq === '' || qq === bot) return true
+        if (qq === bot) return 'reply'
+        if (qq === '') reply = 'reply?'
         continue
       }
-      if (bot !== '' && seg.type === 'at' && (seg.data.qq === bot || seg.data.qq === 'all')) return true
+      if (bot !== '' && seg.type === 'at' && (seg.data.qq === bot || seg.data.qq === 'all')) return 'at'
     }
-    return false
+    return reply
   }
-  if (bot === '') return false
+  if (bot === '') return 'none'
   CQ_AT_RE.lastIndex = 0
   for (const m of raw.matchAll(CQ_AT_RE)) {
-    if (m[1] === bot || m[1] === 'all') return true
+    if (m[1] === bot || m[1] === 'all') return 'at'
   }
   CQ_REPLY_RE.lastIndex = 0
-  return CQ_REPLY_RE.test(raw)
+  return CQ_REPLY_RE.test(raw) ? 'reply?' : 'none'
+}
+
+/**
+ * Settle a 'reply?' mention by asking who sent the quoted message: it counts
+ * only when that is the bot itself, so quoting someone else in a group no
+ * longer reads as @bot. When the sender cannot be learned (no id, unknown
+ * bot, lookup failed or returned nothing) the old fail-open answer stands.
+ * @param replyId - OneBot message_id of the quoted message.
+ * @param bot - the bot's QQ id ('' when unknown).
+ * @param senderOf - looks up the quoted message's sender (get_msg).
+ */
+export async function replyMentionsBot(
+  replyId: string | undefined,
+  bot: string,
+  senderOf: (messageId: string) => Promise<string | undefined>,
+): Promise<boolean> {
+  if (replyId === undefined || replyId === '' || bot === '') return true
+  try {
+    const sender = await senderOf(replyId)
+    return sender === undefined || sender === '' ? true : sender === bot
+  } catch {
+    return true
+  }
 }
 
 /** Split a raw CQ string into segments; used only when no segment array exists. */
