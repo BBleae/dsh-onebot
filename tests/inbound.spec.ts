@@ -679,6 +679,58 @@ describe('M3-D5 prompt-injection isolation', () => {
     await h.connection.stop()
   })
 
+  it('a qq-less reply quoting someone else in a requireMention group does not reach the model', async () => {
+    const h = await makeCmdHarness()
+    const realCall = h.connection.call.bind(h.connection)
+    const lookups: unknown[] = []
+    h.connection.call = (async (action: string, params: unknown) => {
+      if (action === 'get_msg') {
+        lookups.push(params)
+        return { message: [{ type: 'text', data: { text: '原消息' } }], raw_message: '原消息', sender: { user_id: 20005, nickname: 'B' } }
+      }
+      return await realCall(action, params)
+    }) as never
+    // A (10001) quotes B (20005) and @B — NapCat's reply segment carries only the id
+    h.client.send(JSON.stringify({
+      post_type: 'message', message_type: 'group', user_id: 10001, group_id: 888, self_id: 10002, message_id: 9001,
+      message: [{ type: 'reply', data: { id: 556 } }, { type: 'at', data: { qq: '20005' } }, { type: 'text', data: { text: '怎么回事' } }],
+      raw_message: '[CQ:reply,id=556][CQ:at,qq=20005]怎么回事',
+      sender: { user_id: 10001, nickname: 'A' },
+    }))
+    await vi.waitFor(() => expect(lookups).toHaveLength(1))
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(h.captured.followups).toHaveLength(0)
+    h.client.close()
+    await h.bridge.stop()
+    await h.connection.stop()
+  })
+
+  it('a qq-less reply quoting the bot itself passes the gate with a single get_msg', async () => {
+    const h = await makeCmdHarness()
+    const realCall = h.connection.call.bind(h.connection)
+    let lookups = 0
+    h.connection.call = (async (action: string, params: unknown) => {
+      if (action === 'get_msg') {
+        lookups += 1
+        return { message: [{ type: 'text', data: { text: '我说过的话' } }], raw_message: '我说过的话', sender: { user_id: 10002, nickname: '机器人' } }
+      }
+      return await realCall(action, params)
+    }) as never
+    h.client.send(JSON.stringify({
+      post_type: 'message', message_type: 'group', user_id: 10001, group_id: 888, self_id: 10002, message_id: 9002,
+      message: [{ type: 'reply', data: { id: 557 } }, { type: 'text', data: { text: '接着说' } }],
+      raw_message: '[CQ:reply,id=557]接着说',
+      sender: { user_id: 10001, nickname: 'A' },
+    }))
+    await vi.waitFor(() => expect(h.captured.followups).toHaveLength(1))
+    expectInsideBoundary(h.captured.followups[0].text, '[引用]机器人: 我说过的话')
+    // the mention gate and the quote expansion share one lookup
+    expect(lookups).toBe(1)
+    h.client.close()
+    await h.bridge.stop()
+    await h.connection.stop()
+  })
+
   it('neutralizes a nickname forged to close the boundary (whitelist strips markup)', async () => {
     const h = await makeCmdHarness()
     h.client.send(JSON.stringify({

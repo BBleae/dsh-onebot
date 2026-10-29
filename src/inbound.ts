@@ -214,6 +214,9 @@ export class InboundPipeline {
   /** W2-② dedup window state: "chatId#messageId" → first-seen epoch ms, in
    * insertion order (Map) so the oldest entry is the LRU victim. */
   private readonly seenMessages = new Map<string, number>()
+  /** get_msg answers for quoted messages, shared by the mention gate and
+   * expandQuote so one inbound reply costs one lookup (kept briefly). */
+  private readonly quotedMessages = new Map<string, Promise<unknown>>()
 
   constructor(ctx: InboundContext, options: InboundPipelineOptions = {}) {
     this.ctx = ctx
@@ -258,7 +261,7 @@ export class InboundPipeline {
     if (kind === 'group' && this.ctx.config.requireMention && how === 'reply?') {
       const bot = this.ctx.selfId() !== '' ? this.ctx.selfId() : this.ctx.config.botQQ
       mentioned = await replyMentionsBot(inbound.replyId, bot, async (messageId) => {
-        const data = await this.ctx.call('get_msg', { message_id: Number(messageId) }) as {
+        const data = await this.quotedMessage(messageId) as {
           sender?: { user_id?: number | string }
           user_id?: number | string
         }
@@ -512,10 +515,21 @@ export class InboundPipeline {
     }
   }
 
+  /** get_msg for a quoted message, reused for 60 s; a failed lookup is not kept. */
+  private quotedMessage(messageId: string): Promise<unknown> {
+    const cached = this.quotedMessages.get(messageId)
+    if (cached !== undefined) return cached
+    const lookup = this.ctx.call('get_msg', { message_id: Number(messageId) })
+    this.quotedMessages.set(messageId, lookup)
+    lookup.catch(() => this.quotedMessages.delete(messageId))
+    setTimeout(() => this.quotedMessages.delete(messageId), 60_000).unref?.()
+    return lookup
+  }
+
   /** Expand a quoted (reply) message into [引用] text via get_msg. */
   async expandQuote(messageId: string): Promise<string> {
     try {
-      const data = await this.ctx.call('get_msg', { message_id: Number(messageId) }) as {
+      const data = await this.quotedMessage(messageId) as {
         message?: unknown
         raw_message?: string
         sender?: { nickname?: string }
