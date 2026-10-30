@@ -7,9 +7,10 @@
  * and refuses those files, so the model could not look at the sticker.
  */
 import { describe, expect, it } from 'vitest'
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createCanvas } from '@napi-rs/canvas'
 
 import { MediaStore, matchImageExt, sniffImageExt } from '../src/media.js'
 
@@ -71,5 +72,21 @@ describe('matchImageExt', () => {
     expect(await matchImageExt(jpeg)).toBe(jpeg)
     const missing = join(dir, 'gone.jpg')
     expect(await matchImageExt(missing)).toBe(missing)
+  })
+})
+
+describe('renaming runs before shrinking', () => {
+  // shrinkImage picks PNG or JPEG output from the source extension, so a PNG
+  // still named .jpg would be re-encoded as JPEG.
+  it('a large PNG that would default to .jpg is shrunk to a .png', async () => {
+    const canvas = createCanvas(3000, 2000)
+    const ctx = canvas.getContext('2d')
+    ctx.fillStyle = 'rgba(74, 144, 217, 0.5)'
+    ctx.fillRect(0, 0, 1500, 2000)
+    const png = canvas.toBuffer('image/png')
+    const s = new MediaStore(mkdtempSync(join(tmpdir(), 'onebot-ext-')), 6, 1024)
+    const r = await s.resolve({ kind: 'image', file: 'base64://' + png.toString('base64') }, noHash)
+    expect(r?.path.endsWith('-c1024.png')).toBe(true)
+    expect(sniffImageExt(readFileSync(r!.path))).toBe('.png')
   })
 })
